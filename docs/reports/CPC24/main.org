@@ -1,0 +1,2039 @@
+#+TITLE: JAX-based Aeroelastic Framework for Nonlinear Analysis of Large Aircraft Models
+# #A Nearly-Real Time Nonlinear Aeroelastic Simulation Architecture Based on JAX
+#+AUTHOR: Alvaro Cea and Rafael Palacios
+#+BIBLIOGRAPHY:/home/acea/Documents/Engineering.bib
+:LATEX_PROPERTIES:
+#+OPTIONS: toc:nil
+#+OPTIONS: broken-links:mark
+#+BIND: org-latex-prefer-user-labels t
+#+LATEX_HEADER: \synctex=1
+#+LATEX_HEADER: \usepackage[margin=1in]{geometry}
+#+LATEX_HEADER: \usepackage{graphicx}
+#+LATEX_HEADER: \usepackage{amsmath,bm}
+# +LATEX_HEADER: \usepackage{algorithm}
+#+LATEX_HEADER: \usepackage{algpseudocode}
+#+LATEX_HEADER: \usepackage[ruled,vlined]{algorithm2e}
+#+LATEX_HEADER: \usepackage[version=4]{mhchem}
+#+LATEX_HEADER: \usepackage{siunitx}
+#+LATEX_HEADER: \usepackage{longtable,tabularx}
+#+LATEX_HEADER: \usepackage{booktabs}
+#+LATEX_HEADER: \usepackage{tabularx,longtable,multirow,subfigure,caption}
+#+LATEX_HEADER: \setlength\LTleft{0pt} 
+#+LATEX_HEADER: \usepackage{mathrsfs}
+#+LATEX_HEADER: \usepackage{amsfonts}
+#+LATEX_HEADER: \usepackage{enumitem}
+#+LATEX_HEADER: \usepackage{mathalpha}
+#+LATEX_HEADER: \renewcommand{\figurename}{\bf \small Figure}
+#+LATEX_HEADER: \renewcommand{\tablename}{\bf \small Table}
+#+LATEX_HEADER: \newcommand{\de}{\delta}
+#+LATEX_HEADER: \newcommand{\ve}{\text{v}}
+#+LATEX_HEADER: \newcommand{\lo}{\mathcal{L}}
+#+LATEX_HEADER: \newcommand{\vt}{\overline{\delta\bm{\theta}}}
+#+LATEX_HEADER: \newcommand{\vu}{\overline{\delta\bm{u}}}
+#+LATEX_HEADER: \newcommand{\e}{\bm{\mathfrak{e}}}
+#+LATEX_HEADER: \newcommand{\E}{\bm{\mathbb{E}}}
+#+LATEX_HEADER: \newcommand{\T}{\bm{\mathcal{T}}}
+#+LATEX_HEADER: \newcommand{\fra}{(\mathtt{1})}
+#+LATEX_HEADER: \newcommand{\frb}{(\mathtt{2})}
+#+LATEX_HEADER: \newcommand{\fri}{(\mathfrak{i})}
+#+LATEX_HEADER: \newcommand{\bs}[1]{\boldsymbol{#1}}
+#+LATEX_HEADER: \newcommand{\rhoinf}{\rho}	
+#+LATEX_HEADER: \newcommand{\Vinf}{U}
+#+LATEX_HEADER: \newcommand{\Cl}[1]{c_{l_{#1}}}
+#+LATEX_HEADER: \newcommand{\barCl}[1]{\bar{c}_{l_{#1}}}
+#+LATEX_HEADER: \newcommand{\Cm}[1]{c_{m_{#1}}}
+#+LATEX_HEADER: \newcommand{\barCm}[1]{\bar{c}_{m_{#1}}}
+#+LATEX_HEADER: \newcommand{\AIC}{\bs{\mathcal{A}}}
+
+:END:
+
+#+begin_abstract
+This paper presents a new implementation for time-domain nonlinear aeroelastic simulations that has been built for performance and robustness.
+Leveraging on the numerical library JAX, a highly vectorised codebase is written that achieves two orders of magnitude accelerations compare to conventional implementations. This brings full-vehicle simulations to run close to if not in real-time, thus opening new possibilities for aircraft aeroelastic analysis which have traditionally been constrained to either linear, frequency domain solutions, or to their nonlinear counterparts but narrower in scope.
+Moreover, the approach seamlessly integrates with conventional aeroelastic load packages which facilitates the analysis of complex aircraft configurations.
+An extensive verification has been carried out on representative aircraft models and compared with MSC Nastran linear and nonlinear solutions. Furthermore, we demonstrate the suitability of the methodology to accurately reconstruct the full 3D solution. The algorithmic differentiation capabilities in JAX have been tested using proof of concept nonlinear static and dynamic problems. 
+#+end_abstract
+# https://stackoverflow.com/questions/44414584/how-to-export-a-org-mode-table-to-latex-with-the-correct-placement-h
+* House keeping  :noexport: 
+#+begin_src elisp :results none :tangle no :exports none
+  (add-to-list 'org-structure-template-alist
+  '("sp" . "src python :session (print pythonShell)"))
+  (add-to-list 'org-structure-template-alist
+  '("se" . "src elisp"))
+  (setq org-confirm-babel-evaluate nil)
+  (define-key org-mode-map (kbd "C-c ]") 'org-ref-insert-link)
+  (setq org-latex-pdf-process
+    '("latexmk -pdflatex='pdflatex --syntex=1 -interaction nonstopmode' -pdf -bibtex -f %f"))
+  ;; (setq org-latex-pdf-process (list "latexmk -f -pdf -interaction=nonstopmode -output-directory=%o %f"))
+  (pyvenv-workon "fem4inasdev")
+  (require 'org-tempo)
+  ;; Veval_blocks -> eval blocks of latex
+  ;; Veval_blocks_run -> eval blocks to obtain results
+  (setq Veval_blocks "no-export") ;; yes, no, no-export 
+  (setq Veval_blocks_run "no-export")
+  (setq pythonShell "py2")
+  ;; export_blocks: code, results, both, none
+  (setq export_blocks  "results")  
+#+end_src
+
+* Load modules :noexport: 
+:PROPERTIES:
+:header-args: :mkdirp yes  :session (print pythonShell) :noweb yes  :eval (print Veval_blocks) :exports (print export_blocks) :comments both
+:END:
+
+#+begin_src python  :results none 
+  import plotly.express as px
+  import pyNastran.op4.op4 as op4
+  import matplotlib.pyplot as plt
+  import pdb
+  import datetime
+  import os
+  import shutil
+  REMOVE_RESULTS = False
+  #   for root, dirs, files in os.walk('/path/to/folder'):
+  #       for f in files:
+  #           os.unlink(os.path.join(root, f))
+  #       for d in dirs:
+  #           shutil.rmtree(os.path.join(root, d))
+  # 
+  if os.getcwd().split('/')[-1] != 'results':
+      if not os.path.isdir("./figs"):
+          os.mkdir("./figs")
+      if REMOVE_RESULTS:
+          if os.path.isdir("./results"):
+              shutil.rmtree("./results")
+      if not os.path.isdir("./results"):
+          print("***** creating results folder ******")
+          os.mkdir("./results")
+      os.chdir("./results")
+#+end_src
+
+#+NAME: PYTHONMODULES
+#+begin_src python  :results none  :tangle ./results/run.py
+  import pathlib
+  import plotly.express as px
+  import pickle
+  import jax.numpy as jnp
+  import jax
+  import pandas as pd
+  import numpy as np
+  import fem4inas.preprocessor.configuration as configuration  # import Config, dump_to_yaml
+  from fem4inas.preprocessor.inputs import Inputs
+  import fem4inas.fem4inas_main
+  import fem4inas.plotools.uplotly as uplotly
+  import fem4inas.plotools.utils as putils
+  import fem4inas.preprocessor.solution as solution
+  import fem4inas.unastran.op2reader as op2reader
+  import fem4inas.plotools.nastranvtk.bdfdef as bdfdef
+  from tabulate import tabulate
+
+#+end_src
+
+* Run models :noexport:  
+:PROPERTIES:
+:header-args: :mkdirp yes  :session (print pythonShell) :noweb yes :tangle ./results/run.py :eval (print Veval_blocks_run) :exports (print export_blocks) :comments both
+:END:
+
+#+begin_src python :results none
+
+  import time
+
+  TIMES_DICT = dict()
+  SOL = dict()
+  CONFIG = dict()
+
+  def run(input1, **kwargs):
+      jax.clear_caches()
+      label = kwargs.get('label', 'default')
+      t1 = time.time()
+      config =  configuration.Config(input1)
+      sol = fem4inas.fem4inas_main.main(input_obj=config)
+      t2 = time.time()
+      TIMES_DICT[label] = t2 - t1      
+      SOL[label] = sol
+      CONFIG[label] = config
+
+  def save_times():
+      pd_times = pd.DataFrame(dict(times=TIMES_DICT.values()),
+                              index=TIMES_DICT.keys())
+      pd_times.to_csv("./run_times.csv")
+
+#+end_src
+
+
+- Models run on this exercise:
+
+  | Label | Model         | NumModes | Solver                      | tol/dt    | settings       |
+  |-------+---------------+----------+-----------------------------+-----------+----------------|
+  | SP1   | SailPlane     |        5 | Newton-Raphson (Diffrax)    | 1e-6/     |                |
+  | SP2   | ...           |       15 | ...                         | 1e-6/     |                |
+  | SP3   | ...           |       30 | ...                         | 1e-6/     |                |
+  | SP4   | ...           |       50 | ...                         | 1e-6/     |                |
+  | SP5   | ...           |      100 | ...                         | 1e-6/     |                |
+  |-------+---------------+----------+-----------------------------+-----------+----------------|
+  | WSP1  | WingSailPlane |        5 | RK4                         | /         |                |
+  | WSP2  | ...           |       15 | RK4                         | /         |                |
+  | WSP3  | ...           |       30 | RK4                         | /         |                |
+  | WSP4  | ...           |       50 | RK4                         | /         |                |
+  | WSP5  | ...           |      100 | RK4                         | /         |                |
+  |-------+---------------+----------+-----------------------------+-----------+----------------|
+  | XRF1  | XRF1 Airbus   |       70 | RK4                         | 0.005     | [[Table2]],Index=1 |
+  | XRF2  | ...           |       70 | RK4                         | 0.005     | [[Table2]],Index=2 |
+  | XRF3  | ...           |       70 | RK4                         | 0.005     | [[Table2]],Index=3 |
+  | XRF4  | ...           |       70 | RK4                         | 0.005     | [[Table2]],Index=4 |
+  | XRF5  | ...           |       70 | Dopri5 (Diffrax)            | 0.005     | [[Table2]],Index=2 |
+  | XRF6  | ...           |       70 | RK4                         | 0.02      | [[Table2]],Index=2 |
+  | XRF7  | ...           |       70 | Implicit Euler (Diffrax)    | 1e-5/0.02 | [[Table2]],Index=2 |
+  | XRF8  | ...           |       70 | Implicit Kvaerno3 (Diffrax) | 1e-5/0.02 | [[Table2]],Index=2 |
+  |-------+---------------+----------+-----------------------------+-----------+----------------|
+
+
+#+begin_comment
+|   t | $f(t)$ | $f'(t)$ [AD] | $f'(t)$ [FD] |
+|-----+--------+--------------+--------------|
+| 1.5 |   2.81 m |        0.700 |        0.700 |
+| 3.5 |  4.527 m |        1.344 |        1.344 |
+| 5.5 |  6.538 m |        0.623 |        0.623 |
+
+
+| $\alpha$ | $f(\alpha)$          | $f'(\alpha)$ [AD]     | $f'(\alpha)$ [FD]     |
+|----------+----------------------+-----------------------+-----------------------|
+|      0.5 | $1723.2 \times 10^3$ | $3587.71 \times 10^3$ | $3587.77 \times 10^3$ |
+|      1.0 | $3624.4 \times 10^3$ | $3735.26 \times 10^3$ | $3735.11 \times 10^3$ |
+|      1.5 | $5608.3 \times 10^3$ | $3957.81 \times 10^3$ | $3958.31 \times 10^3$ |
+#+end_comment
+
+** SailPlane
+*** Runs
+#+NAME: SP
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+  SP_folder = fem4inas.PATH / "../examples/SailPlane"
+  inp = Inputs()
+  inp.engine = "intrinsicmodal"
+  inp.fem.eig_type = "inputs"
+  inp.fem.connectivity = dict(FuselageFront=['RWingInner',
+                                           'LWingInner'],
+                              FuselageBack=['BottomTail',
+                                            'Fin'],
+                              RWingInner=['RWingOuter'],
+                              RWingOuter=None,
+                              LWingInner=['LWingOuter'],
+                              LWingOuter=None,
+                              BottomTail=['LHorizontalStabilizer',
+                                          'RHorizontalStabilizer'],
+                              RHorizontalStabilizer=None,
+                              LHorizontalStabilizer=None,
+                              Fin=None
+                              )
+
+  inp.fem.folder = pathlib.Path(SP_folder / 'FEM/')
+  inp.fem.num_modes = 50
+  inp.driver.typeof = "intrinsic"
+  inp.simulation.typeof = "single"
+  inp.systems.sett.s1.solution = "static"
+  inp.systems.sett.s1.solver_library = "diffrax"
+  inp.systems.sett.s1.solver_function = "newton_raphson"
+  inp.systems.sett.s1.solver_settings = dict(rtol=1e-6,
+                                             atol=1e-6,
+                                             max_steps=50,
+                                             norm="linalg_norm",
+                                             kappa=0.01)
+  # inp.systems.sett.s1.solver_library = "scipy"
+  # inp.systems.sett.s1.solver_function = "root"
+  # inp.systems.sett.s1.solver_settings = dict(method='hybr',#'krylov',
+  #                                           tolerance=1e-9)
+  inp.systems.sett.s1.xloads.follower_forces = True
+  inp.systems.sett.s1.xloads.follower_points = [[25, 2], [48, 2]]
+
+  inp.systems.sett.s1.xloads.x = [0, 1, 2, 3, 4, 5, 6]
+  inp.systems.sett.s1.xloads.follower_interpolation = [[0.,
+                                                        2e5,
+                                                        2.5e5,
+                                                        3.e5,
+                                                        4.e5,
+                                                        4.8e5,
+                                                        5.3e5],
+                                                       [0.,
+                                                        2e5,
+                                                        2.5e5,
+                                                        3.e5,
+                                                        4.e5,
+                                                        4.8e5,
+                                                        5.3e5]
+                                                       ]
+  inp.systems.sett.s1.t = [1, 2, 3, 4, 5, 6]
+
+#+end_src
+
+**** SP1
+#+NAME: SP1
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<SP>>
+  inp.fem.num_modes = 5
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+  run(inp, label=name)
+
+#+end_src
+**** SP2
+#+NAME: SP2
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<SP>>
+  inp.fem.num_modes = 15
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+  run(inp, label=name)
+#+end_src
+**** SP3
+#+NAME: SP3
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<SP>>
+  inp.fem.num_modes = 30
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+  run(inp, label=name)
+
+#+end_src
+**** SP4
+#+NAME: SP4
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<SP>>
+  inp.fem.num_modes = 50
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+  run(inp, label=name)
+
+#+end_src
+**** SP5
+#+NAME: SP5
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<SP>>
+  inp.fem.num_modes = 100
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+  run(inp, label=name)
+#+end_src
+
+** wingSP
+*** Runs
+#+NAME: wingSP
+#+begin_src python :results none :eval (print Veval_blocks_run)
+
+  wingSP_folder = fem4inas.PATH / "../examples/wingSP"
+  inp = Inputs()
+  inp.engine = "intrinsicmodal"
+  inp.fem.connectivity = {'c1': None}
+  inp.fem.grid = "structuralGrid"
+  inp.fem.folder = pathlib.Path(f'{wingSP_folder}/FEM/')
+  eigenvals = jnp.load(inp.fem.folder / "eigenvals.npy")
+  inp.fem.eig_type = "inputs"
+  inp.driver.typeof = "intrinsic"
+  inp.simulation.typeof = "single"
+  inp.systems.sett.s1.solution = "dynamic"
+  inp.systems.sett.s1.t1 = 15.
+  inp.systems.sett.s1.solver_settings = dict(solver_name="rk4")
+  inp.systems.sett.s1.solver_library = "runge_kutta"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.xloads.follower_forces = True
+  inp.systems.sett.s1.xloads.follower_points = [[23, 0],
+                                                [23, 2]]
+  inp.systems.sett.s1.xloads.x = [0, 4, 4+1e-6, 20]
+  inp.systems.sett.s1.xloads.follower_interpolation = [[0.05 * -2e5, 1 * -2e5, 0., 0.],
+                                                       [0.05 * 6e5, 1 * 6e5,  0., 0.]
+                                                       ]
+
+#+end_src
+
+****  WSP1
+#+NAME: WSP1
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<wingSP>>
+  inp.fem.num_modes = 5
+  inp.systems.sett.s1.dt = round(1./ eigenvals[inp.fem.num_modes]**0.5, 6)
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  run(inp, label=name)
+#+end_src
+****  WSP2
+#+NAME: WSP2
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<wingSP>>
+  inp.fem.num_modes = 15
+  inp.systems.sett.s1.dt = round(1./ eigenvals[inp.fem.num_modes]**0.5, 6)
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  run(inp, label=name)
+#+end_src
+****  WSP3
+#+NAME: WSP3
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<wingSP>>
+  inp.fem.num_modes = 30
+  inp.systems.sett.s1.dt = round(1./ eigenvals[inp.fem.num_modes]**0.5, 6)
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  run(inp, label=name)
+#+end_src
+****  WSP4
+#+NAME: WSP4
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<wingSP>>
+  inp.fem.num_modes = 50
+  inp.systems.sett.s1.dt = round(1./ eigenvals[inp.fem.num_modes]**0.5, 6)
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  run(inp, label=name)
+#+end_src
+****  WSP5
+#+NAME: WSP5
+#+begin_src python :results none :var name=(org-element-property :name (org-element-context))
+
+  <<wingSP>>
+  inp.fem.num_modes = 100
+  inp.systems.sett.s1.dt = round(1./ eigenvals[inp.fem.num_modes]**0.5, 6)
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  run(inp, label=name)
+#+end_src
+
+*** Plot
+:PROPERTIES:
+:header-args+: :tangle ./results/plot_wingSP.py :eval (print Veval_blocks)
+:END:
+
+Read Nastran
+
+#+begin_src python :results none :exports (print export_blocks)
+  <<PYTHONMODULES>>
+  wingSP_folder = fem4inas.PATH / "../examples/wingSP"
+  nastran_path = wingSP_folder / "NASTRAN/"
+  nas_wspl = op2reader.NastranReader(op2name=(nastran_path / "wing_109d.op2"),
+                                     bdfname=(nastran_path / "wing_109b.bdf"))
+  nas_wspl.readModel()
+  t_wspl, u_wspl = nas_wspl.displacements()  
+  ###
+  nas_wsp = op2reader.NastranReader(op2name=(nastran_path / "wing400d.op2"),
+                                     bdfname=(nastran_path / "wing_109b.bdf"))
+  nas_wsp.readModel()
+  t_wsp, u_wsp = nas_wsp.displacements()
+
+#+end_src
+
+#+NAME: WSP1_z
+#+begin_src python :results value file :exports (print export_blocks) 
+  figname = f"figs/{name}.png"
+  sol_wsp1 = solution.IntrinsicReader("./WSP5")
+  x, y = putils.pickIntrinsic2D(sol_wsp1.data.dynamicsystem_s1.t,
+                                sol_wsp1.data.dynamicsystem_s1.ra,
+                                fixaxis2=dict(node=23, dim=2))
+
+  fig = uplotly.lines2d(x, y - y[0], None,
+                        dict(name="NMROM",
+                             line=dict(color="navy")
+                             ),
+                        dict())
+  fig = uplotly.lines2d(t_wsp[0], u_wsp[0,:,-4, 2], fig,
+                        dict(name="NASTRAN",
+                             line=dict(color="grey",
+                                       dash="dash")
+                             ))
+  fig = uplotly.lines2d(t_wspl[0], u_wspl[0,:,-4, 2], fig,
+                        dict(name="NASTRAN",
+                             line=dict(color="red",
+                                       dash="dash")
+                             ))
+  #fig.update_xaxes(range=[0, 5])
+  fig.write_image(f"../{figname}")
+  fig.show()
+  figname
+#+end_src
+
+#+RESULTS: WSP1_z
+[[file:]]
+
+#+NAME: wingSP_x
+#+begin_src python :results value file :exports (print export_blocks) 
+  figname = f"figs/{name}.png"
+  sol_wsp1 = solution.IntrinsicReader("./wingSP")
+  x, y = putils.pickIntrinsic2D(sol_wsp1.data.dynamicsystem_s1.t,
+                                sol_wsp1.data.dynamicsystem_s1.ra,
+                                fixaxis2=dict(node=23, dim=0))
+
+  fig = uplotly.lines2d(x, y - y[0], None,
+                        dict(name="NMROM",
+                             line=dict(color="navy")
+                             ),
+                        dict())
+  fig = uplotly.lines2d(t_wsp[0], u_wsp[0,:,-4, 0], fig,
+                        dict(name="NASTRAN",
+                             line=dict(color="grey",
+                                       dash="dash")
+                             ))
+  #fig.update_xaxes(range=[0, 5])
+  fig.write_image(f"../{figname}")
+  fig.show()
+  figname
+#+end_src
+
+#+NAME: wingSP_y
+#+begin_src python :results value file :exports (print export_blocks)
+  figname = f"figs/{name}.png"
+  sol_wsp1 = solution.IntrinsicReader("./wingSP")
+  x, y = putils.pickIntrinsic2D(sol_wsp1.data.dynamicsystem_s1.t,
+                                sol_wsp1.data.dynamicsystem_s1.ra,
+                                fixaxis2=dict(node=23, dim=1))
+
+  fig = uplotly.lines2d(x, y - y[0], None,
+                        dict(name="NMROM",
+                             line=dict(color="navy")
+                             ),
+                        dict())
+  fig = uplotly.lines2d(t_wsp[0], u_wsp[0,:,-4, 1], fig,
+                        dict(name="NASTRAN",
+                             line=dict(color="grey",
+                                       dash="dash")
+                             ))
+  #fig.update_xaxes(range=[0, 5])
+  fig.write_image(f"../{figname}")
+  fig.show()
+  figname
+#+end_src
+
+** XRF1
+:PROPERTIES:
+:header-args+: 
+:END:
+
+*WARNING: private model, not available open source* 
+
+Gust lengths and corresponding gust velocities that have been run here and elsewhere.
+L_g                          18.0,67.0,116.0,165.0,214
+V0_g                         11.3047276743,14.0732311562,15.4214195361,16.3541764073,17.0785232867
+
+#+NAME: Table2
+#+CAPTION: Table with various gusts on the XRF1 that have been run in this work or in the past
+| Index | Gust length [m] | Gust intensity | Intensity constant | u_inf [m/s] | rho_inf [Kg/m^3008] | Mach |
+|-------+-----------------+----------------+--------------------+-------------+---------------------+------|
+|     1 |              67 |  14.0732311562 |               0.01 |         200 |               1.225 | 0.81 |
+|     2 |              67 |  14.0732311562 |                  2 |         200 |               1.225 | 0.81 |
+|     3 |            165. |  16.3541764073 |               0.01 |         200 |               1.225 | 0.81 |
+|     4 |            165. |  16.3541764073 |                  2 |         200 |               1.225 | 0.81 |
+|     5 |              67 |  14.0732311562 |               0.01 |         200 |               1.225 |   0. |
+|     6 |              67 |  14.0732311562 |                  2 |         200 |               1.225 |   0. |
+|     7 |            165. |  16.3541764073 |               0.01 |         200 |               1.225 |   0. |
+|     8 |            165. |  16.3541764073 |                  2 |         200 |               1.225 |   0. |
+
+
+
+
+#+NAME: XRF
+#+begin_src python :results none
+  xrf1_folder = fem4inas.PATH / "../examples/XRF1/"
+  inp = Inputs()
+  inp.engine = "intrinsicmodal"
+  inp.fem.eig_type = "input_memory"
+  inp.fem.eigenvals = jnp.load(f"{xrf1_folder}/FEM/Dreal70.npy")
+  inp.fem.eigenvecs = jnp.load(f"{xrf1_folder}/FEM/Vreal70.npy").T
+  inp.fem.connectivity = [[1, 7, 13, 31], [2], [3], [4, 5], [27], [6], [],
+                          [8], [9], [10, 11], [29], [12], [],
+                          [14], [15], [16, 21], [17, 23, 25],
+                          [18], [19], [20], [], [22], [], [24], [],
+                          [26], [], [28], [], [30], [], []]
+  inp.fem.folder = pathlib.Path(f"{xrf1_folder}/FEM/")
+  inp.fem.grid = "structuralGridc.txt"
+  inp.fem.num_modes = 70
+  inp.driver.typeof = "intrinsic"
+  inp.simulation.typeof = "single"
+  mach = "081"
+  inp.systems.sett.s1.aero.u_inf = 200.
+  inp.systems.sett.s1.aero.rho_inf = 1.225
+  inp.systems.sett.s1.aero.A = f"{xrf1_folder}/AERO/AICs{mach}_8r{inp.fem.num_modes}.npy"
+  inp.systems.sett.s1.aero.D = f"{xrf1_folder}/AERO/AICsQhj{mach}_8r{inp.fem.num_modes}.npy"
+  inp.systems.sett.s1.aero.poles = f"{xrf1_folder}/AERO/Poles{mach}_8r{inp.fem.num_modes}.npy"
+  inp.systems.sett.s1.solution = "dynamic"
+  inp.systems.sett.s1.t1 = 10.
+  inp.systems.sett.s1.tn = 2001
+  inp.systems.sett.s1.xloads.modalaero_forces = True
+  inp.systems.sett.s1.q0treatment = 2
+  inp.systems.sett.s1.aero.c_ref = 7.271
+  inp.systems.sett.s1.aero.gust_profile = "mc"
+  inp.systems.sett.s1.aero.gust.shift = 0.
+  inp.systems.sett.s1.aero.gust.panels_dihedral = f"{xrf1_folder}/AERO/Dihedral.npy"
+  inp.systems.sett.s1.aero.gust.collocation_points = f"{xrf1_folder}/AERO/Control_nodes.npy"
+#+end_src
+
+*** XRF1
+
+#+NAME: XRF1
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  inp.systems.sett.s1.solver_library = "runge_kutta"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="rk4")
+  inp.systems.sett.s1.aero.gust.intensity = 14.0732311562*0.01
+  inp.systems.sett.s1.aero.gust.length = 67.
+  inp.systems.sett.s1.aero.gust.step = 0.5
+
+  run(inp, label=name)
+#+end_src
+
+*** XRF2
+#+NAME: XRF2
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  inp.systems.sett.s1.solver_library = "runge_kutta"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="rk4")
+  inp.systems.sett.s1.aero.gust.intensity = 16.3541764073 * 0.01
+  inp.systems.sett.s1.aero.gust.length = 165.
+  inp.systems.sett.s1.aero.gust.step = 0.05
+
+  run(inp, label=name)
+#+end_src
+
+*** XRF3
+#+NAME: XRF3
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  inp.systems.sett.s1.solver_library = "runge_kutta"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="rk4")
+  inp.systems.sett.s1.aero.gust.intensity = 14.0732311562*2 #11.304727674272842/10000
+  inp.systems.sett.s1.aero.gust.length = 67.
+  inp.systems.sett.s1.aero.gust.step = 0.5
+
+  run(inp, label=name)
+#+end_src
+
+*** XRF4
+#+NAME: XRF4
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  inp.systems.sett.s1.solver_library = "runge_kutta"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="rk4")
+  inp.systems.sett.s1.aero.gust.intensity = 16.3541764073*2 #11.304727674272842/10000
+  inp.systems.sett.s1.aero.gust.length = 165.
+  inp.systems.sett.s1.aero.gust.step = 0.5
+
+  run(inp, label=name)
+
+
+#+end_src
+
+*** XRF5
+#+NAME: XRF5
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  inp.systems.sett.s1.tn = 2001
+  inp.systems.sett.s1.solver_library = "diffrax"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="Dopri5",#"Kvaerno3",
+                                           )
+
+  inp.systems.sett.s1.aero.gust.intensity = 14.0732311562*2 #11.304727674272842/10000
+  inp.systems.sett.s1.aero.gust.length = 67.
+  inp.systems.sett.s1.aero.gust.step = 0.5
+
+  run(inp, label=name)
+#+end_src
+
+*** XRF6
+
+#+NAME: XRF6
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+  inp.systems.sett.s1.tn = 501
+  inp.systems.sett.s1.solver_library = "runge_kutta"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="rk4")
+  inp.systems.sett.s1.aero.gust.intensity = 14.0732311562*2 #11.304727674272842/10000
+  inp.systems.sett.s1.aero.gust.length = 67.
+  inp.systems.sett.s1.aero.gust.step = 0.5
+
+  run(inp, label=name)
+#+end_src
+
+*** COMMENT XRF7
+#+NAME: XRF7
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  inp.systems.sett.s1.tn = 1501
+  inp.systems.sett.s1.solver_library = "diffrax"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="ImplicitEuler",#"Kvaerno3",
+            # stepsize_controller=dict(PIDController=dict(atol=1e-5,
+                #                                            rtol=1e-5)),
+            root_finder=dict(Newton=dict(atol=1e-5,
+                                         rtol=1e-5))
+                                           )
+
+  inp.systems.sett.s1.aero.gust.intensity = 14.0732311562*2 #11.304727674272842/10000
+  inp.systems.sett.s1.aero.gust.length = 67.
+  inp.systems.sett.s1.aero.gust.step = 0.5
+
+  run(inp, label=name)
+#+end_src
+*** COMMENT XRF8
+#+NAME: XRF8
+#+begin_src python  :noweb yes :results none :var name=(org-element-property :name (org-element-context))
+
+  <<XRF>>
+  inp.driver.sol_path = pathlib.Path(
+      f"./{name}")
+
+  inp.systems.sett.s1.tn = 1501
+  inp.systems.sett.s1.solver_library = "diffrax"
+  inp.systems.sett.s1.solver_function = "ode"
+  inp.systems.sett.s1.solver_settings = dict(solver_name="Kvaerno3", #"ImplicitEuler",#"Kvaerno3",
+            # stepsize_controller=dict(PIDController=dict(atol=1e-5,
+            #                                            rtol=1e-5)),
+            root_finder=dict(Newton=dict(atol=1e-5,
+                                        rtol=1e-5))                              
+            # root_finder=dict(Newton=dict(atol=1e-6,
+            #                              rtol=1e-6))
+                                           )
+
+  inp.systems.sett.s1.aero.gust.intensity = 14.0732311562*2 #11.304727674272842/10000
+  inp.systems.sett.s1.aero.gust.length = 67.
+  inp.systems.sett.s1.aero.gust.step = 0.5
+  run(inp, label=name)
+#+end_src
+
+** Wrap up
+#+begin_src python :results none
+  save_times()
+#+end_src
+* NASTRAN :noexport: 
+:PROPERTIES:
+:header-args: :mkdirp yes :tangle ./results/run_nastran.sh :eval no :exports (print export_blocks) :comments both
+:END:
+
+#+begin_src bash :shebang #!/bin/zsh :session *nastran*
+  source ~/.zshrc
+  cd "../../../examples/SailPlane/NASTRAN/static400/"
+  start=$(date +%s.%N)
+  nastran "run.bdf"
+  pidn=$!
+  wait $pidn
+  #sleep 6
+  end=$(date +%s.%N)
+  runtime=$(echo "$end - $start" | bc)
+  echo "Runtime: $runtime seconds" > runtime_output.txt
+#+end_src
+
+
+#+begin_src bash
+  # WSP400file="../../../examples/wingSP/NASTRAN/wing400d.bdf"
+  # nastran $WSP400file
+  # WSP109file="../../../examples/wingSP/NASTRAN/wing109d.bdf"
+  # nastran $WSP109file
+#+end_src
+
+[[file:../../../examples/SailPlane/generate3D.py][SailPlane generate 3D]]
+
+* Plotting :noexport: 
+:PROPERTIES:
+:header-args:  :session (print pythonShell) :noweb yes :tangle ./results/examples.py :eval (print Veval_blocks_run) :exports (print export_blocks) :comments both
+:END:
+** Helper functions
+
+#+begin_src python :results none  :var name=(org-element-property :name (org-element-context))
+
+  def fig_out(name, figformat="png", update_layout=None):
+      def inner_decorator(func):
+          def inner(*args, **kwargs):
+              fig = func(*args, **kwargs)
+              if update_layout is not None:
+                  fig.update_layout(**update_layout)
+              fig.show()
+              figname = f"figs/{name}.{figformat}"
+              fig.write_image(f"../{figname}")
+              return fig, figname
+          return inner
+      return inner_decorator
+
+
+  def fig_background(func):
+
+      def inner(*args, **kwargs):
+          fig = func(*args, **kwargs)
+          # if fig.data[0].showlegend is None:
+          #     showlegend = True
+          # else:
+          #     showlegend = fig.data[0].showlegend
+
+          fig.update_xaxes(
+                         titlefont=dict(size=16),
+                         tickfont = dict(size=16),
+                         mirror=True,
+                         ticks='outside',
+                         showline=True,
+                         linecolor='black',
+              #zeroline=True,
+          #zerolinewidth=2,
+              #zerolinecolor='LightPink',
+                         gridcolor='lightgrey')
+          fig.update_yaxes(tickfont = dict(size=16),
+                         titlefont=dict(size=16),
+                         zeroline=True,
+                         mirror=True,
+                         ticks='outside',
+                         showline=True,
+                         linecolor='black',
+                         gridcolor='lightgrey')
+          fig.update_layout(plot_bgcolor='white',
+                            yaxis=dict(zerolinecolor='lightgrey'),
+                            showlegend=True, #showlegend,
+                            margin=dict(
+                                autoexpand=True,
+                                l=0,
+                                r=0,
+                                t=2,
+                                b=0
+                            ))
+          return fig
+      return inner
+
+  @fig_background
+  def xrf1_wingtip(sol, dim, nast_scale=None, nast_load=None):
+      scale = 100./33.977
+      fig=None
+      x, y = putils.pickIntrinsic2D(sol.data.dynamicsystem_s1.t,
+                                    sol.data.dynamicsystem_s1.ra,
+                                    fixaxis2=dict(node=150, dim=dim))
+
+      fig = uplotly.lines2d(x[1:], (y[:-1]-y[0])*scale, fig,
+                            dict(name="NMROM",
+                                 line=dict(color="navy")
+                                 ))
+      if nast_scale is not None:
+          offset = 0. #u111m[nast_load,0,-1, dim]
+          fig = uplotly.lines2d(t111m[nast_load], (u111m[nast_load,:,-1, dim] -
+                                                   offset) * nast_scale*scale, fig,
+                                dict(name="NASTRAN",
+                                     line=dict(color="grey",
+                                               dash="dot")
+                                     ))
+      dim_dict = {0:'x', 1:'y', 2:'z'}
+      fig.update_yaxes(title='$\hat{u}'+f'_{dim_dict[dim]}$')
+      fig.update_xaxes(range=[0, 4], title='time [s]')
+      #fig.update_yaxes(range=[-0.1, 0.2])
+      fig.update_layout(yaxis=dict(zerolinecolor='black'))      
+      return fig
+
+  @fig_background
+  def xrf1_wingtip2(sol1, sol2, dim, labels=None,nast_scale=None, nast_load=None):
+      scale = 100./33.977
+      fig=None
+      x1, y1 = putils.pickIntrinsic2D(sol1.data.dynamicsystem_s1.t,
+                                    sol1.data.dynamicsystem_s1.ra,
+                                    fixaxis2=dict(node=150, dim=dim))
+      x2, y2 = putils.pickIntrinsic2D(sol2.data.dynamicsystem_s1.t,
+                                    sol2.data.dynamicsystem_s1.ra,
+                                    fixaxis2=dict(node=150, dim=dim))
+
+      fig = uplotly.lines2d(x1[:], (y1[:]-y1[0])*scale, fig,
+                            dict(name=f"NMROM-{labels[0]}",
+                                 line=dict(color="navy")
+                                 ))
+      fig = uplotly.lines2d(x2[1:], (y2[:-1]-y2[0])*scale, fig,
+                            dict(name=f"NMROM-{labels[1]}",
+                                 line=dict(color="blue")
+                                 ))
+
+      if nast_scale is not None:
+          offset = 0. #u111m[nast_load[0],0,-1, dim]
+          fig = uplotly.lines2d(t111m[nast_load[0]], (u111m[nast_load[0],:,-1, dim] - offset)*nast_scale*scale, fig,
+                                dict(name=f"NASTRAN-{labels[0]}",
+                                     line=dict(color="black",
+                                               dash="dash",
+                                               width=1.5)
+                                     ))
+          offset2 = 0. #u111m[nast_load[1],0,-1, dim]
+          fig = uplotly.lines2d(t111m[nast_load[1]], (u111m[nast_load[1],:,-1, dim] - offset2)*nast_scale*scale, fig,
+                                dict(name=f"NASTRAN-{labels[1]}",
+                                     line=dict(color="grey",
+                                               dash="dot",
+                                               width=1.5)
+                                     ))
+      dim_dict = {0:'x', 1:'y', 2:'z'}
+      fig.update_yaxes(title='$\hat{u}' + f'_{dim_dict[dim]}$')
+      fig.update_xaxes(range=[0, 4], title='time [s]')
+      return fig
+
+  @fig_background
+  def xrf1_wingtip4(sol1, sol2, sol3, sol4, dim, labels=None,nast_scale=None, nast_load=None):
+      scale = 100./33.977
+      fig=None
+      x1, y1 = putils.pickIntrinsic2D(sol1.data.dynamicsystem_s1.t,
+                                      sol1.data.dynamicsystem_s1.ra,
+                                      fixaxis2=dict(node=150, dim=dim))
+      x2, y2 = putils.pickIntrinsic2D(sol2.data.dynamicsystem_s1.t,
+                                      sol2.data.dynamicsystem_s1.ra,
+                                      fixaxis2=dict(node=150, dim=dim))
+      x3, y3 = putils.pickIntrinsic2D(sol3.data.dynamicsystem_s1.t,
+                                      sol3.data.dynamicsystem_s1.ra,
+                                      fixaxis2=dict(node=150, dim=dim))
+      x4, y4 = putils.pickIntrinsic2D(sol4.data.dynamicsystem_s1.t,
+                                      sol4.data.dynamicsystem_s1.ra,
+                                      fixaxis2=dict(node=150, dim=dim))
+
+      fig = uplotly.lines2d(x1[1:], (y1[:-1]-y1[0])*scale, fig,
+                            dict(name=f"NMROM-{labels[0]}",
+                                 line=dict(color="orange",
+                                           dash="solid")
+                                 ))
+      fig = uplotly.lines2d(x2[:], (y2[:]-y2[0])*scale, fig,
+                            dict(name=f"NMROM-{labels[1]}",
+                                 line=dict(color="blue", dash="dot")
+                                 ))
+      fig = uplotly.lines2d(x3[:], (y3[:]-y3[0])*scale, fig,
+                            dict(name=f"NMROM-{labels[2]}",
+                                 line=dict(color="red")
+                                 ))
+      fig = uplotly.lines2d(x4[:], (y4[:]-y4[0])*scale, fig,
+                            dict(name=f"NMROM-{labels[3]}",
+                                 line=dict(color="grey", dash="dash")
+                                 ))
+
+      dim_dict = {0:'x', 1:'y', 2:'z'}
+      fig.update_yaxes(title='$\hat{u}' + f'_{dim_dict[dim]}$')
+      fig.update_xaxes(range=[0, 4], title='time [s]')
+      return fig
+
+  @fig_background
+  def wsp_wingtip(sol_list, dim, labels=None, nast_load=None, axes=None):
+      scale = 100./28.8
+      fig = None
+      colors=["darkgrey", "darkgreen",
+              "blue", "magenta", "orange", "black"]
+      dash = ['dash', 'dot', 'dashdot']
+      modes = [5, 15, 30, 50, 100]
+      for i, si in enumerate(sol_list):
+          x, y = putils.pickIntrinsic2D(si.data.dynamicsystem_s1.t,
+                                        si.data.dynamicsystem_s1.ra,
+                                        fixaxis2=dict(node=23, dim=dim))
+          if i != len(sol_list) - 1:
+            fig = uplotly.lines2d(x, (y - y[0]) * scale, fig,
+                                  dict(name=f"NMROM {modes[i]} modes",
+                                       line=dict(color=colors[i],
+                                                 dash=dash[i % 3])
+                                       ),
+                                  dict())
+          else:
+            fig = uplotly.lines2d(x, (y - y[0]) * scale, fig,
+                                  dict(name=f"NMROM {modes[i]} modes",
+                                       line=dict(color=colors[i])
+                                       ),
+                                  dict())              
+      if nast_load is not None:
+          fig = uplotly.lines2d(t_wsp[nast_load], u_wsp[nast_load,:,-4, dim]* scale, fig,
+                                dict(name="NASTRAN-400",
+                                     line=dict(color="black",
+                                               dash="dash")
+                                     ))
+          fig = uplotly.lines2d(t_wspl[nast_load], u_wspl[nast_load,:,-4, dim]* scale, fig,
+                                dict(name="NASTRAN-109",
+                                     line=dict(color="red",
+                                               #dash="dash"
+                                               )
+                                     ))
+      dim_dict = {0:'x', 1:'y', 2:'z'}
+      if axes is None:
+          fig.update_yaxes(title='$\hat{u}_%s$'%dim_dict[dim])
+          fig.update_xaxes(range=[0, 15], title='time [s]')
+      else:
+          fig.update_yaxes(range=axes[1], title='$\hat{u}_%s$'%dim_dict[dim])
+          fig.update_xaxes(range=axes[0], title='time [s]')
+
+      return fig
+
+  def fn_spErrorold(sol_list, config, print_info=True):
+
+    sol_sp= [solution.IntrinsicReader(f"./SP{i}") for i in range(1,6)]
+    err = {f"M{i}_L{j}": 0. for i in range(1,6) for j in range(6)}
+    for li in range(6): # loads
+      for mi in range(1,6):  # modes
+        count = 0  
+        for index, row in config.fem.df_grid.iterrows():
+          r_spn = u_sp[li, row.fe_order,:3] + config.fem.X[index]
+          r_sp = sol_sp[mi - 1].data.staticsystem_s1.ra[li,:,index]
+          err[f"M{mi}_L{li}"] += jnp.linalg.norm(r_spn - r_sp) #/ jnp.linalg.norm(r_spn)
+          # print(f"nas = {r_spn}  ,  {r_sp}")
+          count += 1
+        err[f"M{mi}_L{li}"] /= count
+        if print_info:
+            print(f"**** LOAD: {li}, NumModes: {mi} ****")
+            print(err[f"M{mi}_L{li}"])
+    return err
+
+  def fn_spError(sol_list, config, print_info=True):
+
+      sol_sp= [solution.IntrinsicReader(f"./SP{i}") for i in range(1,6)]
+      err = {f"M{i}_L{j}": 0. for i in range(1,6) for j in range(6)}
+      for li in range(6): # loads
+        for mi in range(1,6):  # modes
+          count = 0
+          r_spn = []
+          r_sp = []
+          for index, row in config.fem.df_grid.iterrows():
+            r_spn.append(u_sp[li, row.fe_order,:3] + config.fem.X[index])
+            r_sp.append(sol_sp[mi - 1].data.staticsystem_s1.ra[li,:,index])
+            # print(f"nas = {r_spn}  ,  {r_sp}")
+            # count += 1
+          r_spn = jnp.array(r_spn)
+          r_sp = jnp.array(r_sp)        
+          err[f"M{mi}_L{li}"] += jnp.linalg.norm(r_spn - r_sp) #/ jnp.linalg.norm(r_spn)
+          err[f"M{mi}_L{li}"] /= len(r_sp)
+          if print_info:
+              print(f"**** LOAD: {li}, NumModes: {mi} ****")
+              print(err[f"M{mi}_L{li}"])
+      return err
+
+  def fn_spWingsection(sol_list, config):
+
+      sol_sp= [solution.IntrinsicReader(f"./SP{i}") for i in range(1,6)]
+      r_spn = []
+      r_spnl = []
+      r_sp = []
+      for li in range(6): # loads
+        for mi in [4]:#range(1,6):  # modes
+          r_spni = []
+          r_spnli = []
+          r_spi = []
+          r_sp0 = []
+          for index, row in config.fem.df_grid.iterrows():
+            if row.fe_order in list(range(20)):
+              r_sp0.append(config.fem.X[index])  
+              r_spni.append(u_sp[li, row.fe_order,:3] + config.fem.X[index])
+              #r_spnl.append(u_spl[li, row.fe_order,:3] + config.fem.X[index])
+              r_spi.append(sol_sp[mi - 1].data.staticsystem_s1.ra[li,:,index])
+            # print(f"nas = {r_spn}  ,  {r_sp}")
+            # count += 1
+
+          r_spn.append(jnp.array(r_spni))
+          r_spnl.append(jnp.array(r_spnli))
+          r_sp.append(jnp.array(r_spi))
+      r_sp0 = jnp.array(r_sp0)
+      return r_sp0, r_sp, r_spn, r_spnl
+
+  @fig_background
+  def plot_spWingsection(r0, r, rn, rnl):
+      fig = None
+      # colors=["darkgrey", "darkgreen",
+      #         "blue", "magenta", "orange", "black"]
+      # dash = ['dash', 'dot', 'dashdot']
+      modes = [5, 15, 30, 50, 100]
+      for li in range(6):
+        if li == 0:   
+            fig = uplotly.lines2d((r[li][:,0]**2 + r[li][:,1]**2)**0.5, r[li][:,2]-r0[:,2], fig,
+                                  dict(name=f"NMROM",
+                                       line=dict(color="blue",
+                                                 dash="solid")
+                                       ),
+                                    dict())
+            fig = uplotly.lines2d((rn[li][:,0]**2 + rn[li][:,1]**2)**0.5, rn[li][:,2]-r0[:,2], fig,
+                                  dict(name=f"NASTRAN-400",
+                                       line=dict(color="black",
+                                                 dash="dash")
+                                       ),
+                                  dict())
+        else:
+            fig = uplotly.lines2d((r[li][:,0]**2 + r[li][:,1]**2)**0.5, r[li][:,2]-r0[:,2], fig,
+                                  dict(showlegend=False,
+                                       line=dict(color="blue",
+                                                 dash="solid")
+                                       ),
+                                    dict())
+            fig = uplotly.lines2d((rn[li][:,0]**2 + rn[li][:,1]**2)**0.5, rn[li][:,2]-r0[:,2], fig,
+                                  dict(showlegend=False,
+                                       line=dict(color="black",
+                                                 dash="dash")
+                                       ),
+                                  dict())
+      fig.update_yaxes(title='Uz [m]')
+      fig.update_xaxes(title='S [m]')
+
+      # fig = uplotly.lines2d((rnl[:,0]**2 + rnl[:,1]**2)**0.5, rnl[:,2], fig,
+      #                       dict(name=f"NASTRAN-101",
+      #                            line=dict(color="grey",
+      #                                      dash="solid")
+      #                                  ),
+      #                             dict())
+      return fig
+
+  @fig_background
+  def fn_spPloterror(error):
+
+      loads = [200, 250, 300, 400, 480, 530]
+      num_modes = [5, 15, 30, 50, 100]
+      e250 = jnp.array([error[f'M{i}_L1'] for i in range(1,6)])
+      e400 = jnp.array([error[f'M{i}_L3'] for i in range(1,6)])
+      e530 = jnp.array([error[f'M{i}_L5'] for i in range(1,6)])
+      fig = None
+      fig = uplotly.lines2d(num_modes, e250 , fig,
+                                dict(name="Error, F = 250 KN",
+                                     line=dict(color="red")
+                                     ),
+                                dict())
+      fig = uplotly.lines2d(num_modes, e400, fig,
+                                dict(name="Error, F = 400 KN",
+                                     line=dict(color="green", dash="dash")
+                                     ),
+                                dict())
+      fig = uplotly.lines2d(num_modes, e530, fig,
+                                dict(name="Error, F = 530 KN",
+                                     line=dict(color="black", dash="dot")
+                                     ),
+                                dict())
+
+      fig.update_yaxes(type="log", tickformat= '.0e')
+      fig.update_layout(height=950)
+      return fig
+
+  @fig_background
+  def fn_spPloterror3D(error, error3d):
+
+      loads = [200, 250, 300, 400, 480, 530]
+      fig = None
+      if error is not None:
+        fig = uplotly.lines2d(loads, error, fig,
+                                  dict(name="Error ASET",
+                                       line=dict(color="red"),
+                                       marker=dict(symbol="square")
+                                       ),
+                                  dict())
+
+      fig = uplotly.lines2d(loads, error3d, fig,
+                                dict(name="Error full 3D",
+                                     line=dict(color="green")
+                                     ),
+                                dict())
+
+      fig.update_yaxes(type="log", tickformat= '.0e')
+      fig.update_layout(height=700,
+                        showlegend=False,
+                        xaxis_title='Loading [KN]',
+                        yaxis_title='$\epsilon$')
+
+      return fig
+
+  def fn_wspError(sol_list):
+      error_dict = dict()
+      for i, si in enumerate(sol_list):
+          for di in range(3):
+              x, y = putils.pickIntrinsic2D(si.data.dynamicsystem_s1.t,
+                                            si.data.dynamicsystem_s1.ra,
+                                            fixaxis2=dict(node=23, dim=di))
+              yinterp = jnp.interp(t_wsp, x, y)
+              ynastran = u_wsp[0,:,-4, di] + y[0]
+              n = 10000
+              error = jnp.linalg.norm((yinterp[1,:n] - ynastran[:n]) / ynastran[:n]) / len(ynastran[:n])
+              label = f"M{i}x{di}"
+              error_dict[label] = error
+
+      return error_dict
+
+  @fig_background
+  def fn_wspPloterror(error):
+
+      loads = [200, 250, 300, 400, 480, 530]
+      num_modes = [5, 15, 30, 50, 100]
+      ex1 = [error[f'M{i}x0'] for i in range(5)]
+      ex2 = [error[f'M{i}x1'] for i in range(5)]
+      ex3 = [error[f'M{i}x2'] for i in range(5)]
+      fig = None
+      fig = uplotly.lines2d(num_modes, ex1, fig,
+                                dict(name="Error - x1",
+                                     line=dict(color="red")
+                                     ),
+                                dict())
+      fig = uplotly.lines2d(num_modes, ex2, fig,
+                                dict(name="Error - x2",
+                                     line=dict(color="green")
+                                     ),
+                                dict())
+      fig = uplotly.lines2d(num_modes, ex3, fig,
+                                dict(name="Error - x3",
+                                     line=dict(color="black")
+                                     ),
+                                dict())
+
+      fig.update_yaxes(type="log", tickformat= '.0e')
+      return fig
+
+  @fig_background
+  def fn_wspPloterror3D(time, error):
+
+      fig = None
+      fig = uplotly.lines2d(time, error, fig,
+                                dict(name="Error",
+                                     line=dict(color="blue")
+                                     ),
+                                dict())
+
+      fig.update_yaxes(type="log", tickformat= '.0e')
+      fig.update_layout(
+                        height=950,
+                        xaxis_title='Time [s]',
+                        yaxis_title='Error')
+      return fig
+
+#+end_src
+
+**** COMMENT Plot alphas
+#+begin_src python :results none :tangle ./results/plot_XRF1.py
+  import numpy as np
+  directory = fem4inas.PATH / "../Models/XRF1-2/Results_modes/"
+  nmodes = 70
+  #q = np.load("%s/q_%s.npy"%(directory, nmodes))
+  omega = np.load("%s/../Results_modes/Omega_%s.npy"%(directory, nmodes))
+  alpha1 = np.load("%s/../Results_modes/alpha1_%s.npy"%(directory, nmodes))
+  alpha2 = np.load("%s/../Results_modes/alpha2_%s.npy"%(directory, nmodes))
+  gamma1 = np.load("%s/../Results_modes/gamma1_%s.npy"%(directory, nmodes))
+  gamma2 = np.load("%s/../Results_modes/gamma2_%s.npy"%(directory, nmodes))
+#+end_src
+
+#+NAME: XRF1Plot_alpha1old
+#+begin_src python :results value file :exports (print export_blocks) :tangle ./results/plot_XRF1.py
+  figname = f"figs/{name}.png"
+  fig = px.imshow(np.abs(alpha1-np.eye(70)),
+                  labels=dict(color="Absolute values"),
+                  color_continuous_scale="Blues"
+                  )
+  fig.update_layout(coloraxis_colorbar=dict(tickfont=dict(size=16)),margin=dict(
+        autoexpand=True,
+        l=0,
+        r=0,
+        t=0,
+        b=0
+    ))
+  fig.update_xaxes(title='Mode',
+                   titlefont=dict(size=16),
+                   tickfont = dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+  fig.update_yaxes(title='Mode', tickfont = dict(size=16),
+                   titlefont=dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+  #fig.update_traces(colorbar_tickfont=dict(size=26))
+  fig.write_image(f"../{figname}")
+  fig.show()
+  figname
+#+end_src
+
+
+#+NAME: XRF1Plot_alpha1
+#+begin_src python :results value file :exports (print export_blocks) :tangle ./results/plot_XRF1.py
+
+  figname = f"figs/{name}.png"
+  sol_x1 = solution.IntrinsicReader("./Gust3")
+  fig = px.imshow(np.abs(sol_x1.data.couplings.alpha1-np.eye(70)),
+                  labels=dict(color="Absolute values"),
+                  color_continuous_scale="Blues"
+                  )
+  fig.update_layout(coloraxis_colorbar=dict(tickfont=dict(size=16)),margin=dict(
+        autoexpand=True,
+        l=0,
+        r=0,
+        t=0,
+        b=0
+    ))
+  fig.update_xaxes(title='Mode',
+                   titlefont=dict(size=16),
+                   tickfont = dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+  fig.update_yaxes(title='Mode', tickfont = dict(size=16),
+                   titlefont=dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+
+  fig.write_image(f"../{figname}")
+  fig.show()
+  figname
+#+end_src
+
+#+NAME: XRF1Plot_alpha2old
+#+begin_src python :results value file :exports (print export_blocks) :tangle ./results/plot_XRF1.py
+  figname = f"figs/{name}.png"
+  fig = px.imshow(np.abs(alpha2-np.eye(70)),
+                  labels=dict(color="Absolute values"),
+                  color_continuous_scale="Blues"
+                  )
+  fig.update_layout(coloraxis_colorbar=dict(tickfont=dict(size=16)),margin=dict(
+        autoexpand=True,
+        l=0,
+        r=0,
+        t=0,
+        b=0
+    ))
+  fig.update_xaxes(title='Mode',
+                   titlefont=dict(size=16),
+                   tickfont = dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+  fig.update_yaxes(title='Mode', tickfont = dict(size=16),
+                   titlefont=dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+
+
+  fig.write_image(f"../{figname}")
+  fig.show()
+  figname
+#+end_src
+
+#+NAME: XRF1Plot_alpha2
+#+begin_src python :results value file :exports (print export_blocks) :tangle ./results/plot_XRF1.py
+  #px.colors.named_colorscales()
+  figname = f"figs/{name}.png"
+  fig = px.imshow(np.abs(sol_x1.data.couplings.alpha2-np.eye(70)),
+                  labels=dict(color="Absolute values"),
+                  color_continuous_scale="Blues"
+                  )
+  fig.update_layout(coloraxis_colorbar=dict(tickfont=dict(size=16)),margin=dict(
+        autoexpand=True,
+        l=0,
+        r=0,
+        t=0,
+        b=0
+    ))
+  fig.update_xaxes(title='Mode',
+                   titlefont=dict(size=16),
+                   tickfont = dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+  fig.update_yaxes(title='Mode', tickfont = dict(size=16),
+                   titlefont=dict(size=16)
+                   # mirror=True,
+                   # ticks='outside',
+                   # showline=True,
+                   # linecolor='black',
+                   # gridcolor='lightgrey'
+                   )
+
+  fig.write_image(f"../{figname}")
+  fig.show()
+  figname
+#+end_src
+
+** NASTRAN data
+Read data from Nastran simulations
+#+begin_src python  :results none 
+
+  <<PYTHONMODULES>>
+
+  examples_path = pathlib.Path("../../../../examples")
+  ####### SailPlane ###########
+  SP_folder = examples_path / "SailPlane"
+  #nastran_path = wingSP_folder / "NASTRAN/"
+
+  op2model = op2reader.NastranReader("/Users/ac5015/pCloud Drive/Imperial/Computations/FEM4INAS/Models/SailPlane/SP400/SailPlane_MakeMatc.op2",
+                                   "/Users/ac5015/pCloud Drive/Imperial/Computations/FEM4INAS/Models/SailPlane/SP400/SailPlane_MakeMatc.bdf",
+                                   static=True)
+  op2model = op2reader.NastranReader(SP_folder / "NASTRAN/static400/run.op2",
+                                     SP_folder / "NASTRAN/static400/run.bdf",
+                                   static=True)
+
+  op2model.readModel()
+  t_sp, u_sp = op2model.displacements()
+
+  ####### wingSP ###########
+  wingSP_folder = examples_path / "wingSP"
+  nastran_path = wingSP_folder / "NASTRAN/"
+  nas_wspl = op2reader.NastranReader(op2name=(nastran_path / "wing_109d.op2"),
+                                     bdfname=(nastran_path / "wing_109b.bdf"))
+  nas_wspl.readModel()
+  t_wspl, u_wspl = nas_wspl.displacements()  
+  # ###
+  nas_wsp = op2reader.NastranReader(op2name=(nastran_path / "wing400d.op2"),
+                                     bdfname=(nastran_path / "wing_109b.bdf"))
+  nas_wsp.readModel()
+  t_wsp, u_wsp = nas_wsp.displacements()
+  ####### XRF1 ###########
+  nastran_path = examples_path / "XRF1/NASTRAN/146-111/"
+  nas111 = op2reader.NastranReader(op2name=(nastran_path / "XRF1-146run.op2"))
+  nas111.readModel()
+  t111, u111 = nas111.displacements()
+
+  nastran_pathm = examples_path / "XRF1/NASTRAN/146-111_081"
+  nas111m = op2reader.NastranReader(op2name=(nastran_pathm / "XRF1-146run.op2"))
+  nas111m.readModel()
+  t111m, u111m = nas111m.displacements()
+
+  sp_error3d = jnp.load(examples_path/ "SailPlane/sp_err.npy")
+  wsp_error3d = jnp.load(examples_path/ "wingSP/wsp_err.npy")
+
+#+end_src
+
+* Introduction
+Our proposed method has two main inputs for the analysis: a linear (arbitrarily complex) FE model, and aerodynamic influence coefficient matrices that provide the mapping between FE states and the corresponding aerodynamic forces (either in modal or in physical coordinates). The latter are obtained herein from the Doublet Lattice Method (DLM) and a rational function approximation (RFA) cite:&ROGER1975 to transform to the time domain. We have also presented a more efficient data-driven approach that circumvents the additional states added by the RFA in cite:&PALACIOS2023b and the approach would also be suitable for more accurate Computational Fluids Aerodynamics (CFD). Using the 3D FE model, a skeleton-like substructure along the main load paths is derived, on which modal shapes and nonlinear couplings are evaluated in intrinsic variables (velocities and strains). They conform a basis of a Galerkin-projection of the geometrically-nonlinear 1D domain after which the projected equations are solved in time-domain. Advantages of the approach are its direct and accurate map between the 3D and 1D domains, as it only requires of a modal condensation that is already available in many industrial aeroelastic models to link the structural model to the aerodynamic loading.
+This is unlike stick models which need of various post-processing steps to build the equivalent stiffness and mass models.
+Furthermore, we show how the full 3D solution using the nonlinear 1D solution is computed to a good accuracy by reconstructing the cross-sectional elements and applying a Radial Basis Function (RBF) interpolation to the remaining nodes in the domain.
+A well established formulation effectively applied to industrial-scale aeroelastic models and now combined with a highly vectorised implementation in JAX results in an extremely efficient nonlinear aeroelastic solver. The overall procedure has been implemented in what we have named as \emph{Nonlinear Modal Reduced Order Model} (NMROM). 
+\\
+The structure of the rest of the paper is as follows. Sec. [[Theory and implementation]] presents a summary of the mathematical description that conforms the backbone behind the computational implementation of \texttt{FEM$_4$INAS} (Finite-Element-Models for Intrinsic Nonlinear Aeroelastic Simulations), the high performance software for aeroelasticity we have built. Sec. [[Examples]] shows the verification cases that cover the static and dynamic structural response of of a simplified aircraft model, and the aeroelastic response to gusts of a full aircraft configuration. The improvements in performance are highlighted in all of the examples. 
+Lastly, sec. [[Conclusions]] summarises the the achievements and further developments planned for future work.
+
+* Theory and implementation
+In this section we briefly describe the backbone theory of the proposed methods for nonlinear aeroelasticity modelling. For further details, see cite:&CEA2021, cite:&CEA2023.
+A major contribution with respect to our previous works is a new computational implementation that achieves accelerations of over 2 orders of magnitude compared to standard implementations[fn:2::Both the new implementation and the examples of this paper can be found at https://github.com/ACea15/FEM4INAS.]. Furthermore, a highly modular, flexible architecture based on software design patterns has been put in place cite:&CEA2024.
+The key enabler was moving from standard Python to a highly vectorised, JAX-based numerical implementation. JAX is a Python library designed for high-performance numerical computing with focus on machine learning activities \cite{jax2018github}. 
+Next we described the main formulation that leads to a geometrically nonlinear enhancement of generic aircraft models and its integration into an aeroelastic framework, along with some implementation details.
+** Airframe idealisation
+An illustration of the overall solution process is presented in Fig. [[workflow]].  
+We start with a global FE model of the airframe. It is common practice for large-scale aeroelastic models to feature lumped masses along a load path axis that are attached to their corresponding cross-sectional nodes via interpolation elements. With those characteristics  a reduced model can be obtained from a static or dynamic condensation that captures well the stiffness and inertia properties in the condensed matrices, $\pmb{K}_a$ and $\pmb{M}_a$.
+A database of Aerodynamic Influence Coefficient matrices (AICs) is also needed as input; this may be given in a CFD-based ROM cite:&RIPEPI2018a, in time-domain panel method, as in the Unsteady Vortex Lattice (UVLM) cite:&Maraniello2019, or in frequency domain, as in the Doublet Lattice  (DLM), in which case a RFA in used to amend the data for time-domain simulations. 
+The modal-based aerodynamics and the condensed matrices of the structure are input into a our analysis framework that builds the nonlinear dynamics of the condensed model without having to call back the stiffness and mass matrices. To achieve this a formulation based on velocities and strains in the material frame of reference is employed. 
+\\
+After the state of the condensed model has been solved for, the full 3D state can be reconstructed: firstly the displacements of the cross-sectional nodes linked to the reduced model via the interpolation elements are computed using the positions and rotations of the latter; secondly, Radial Basis Functions (RBFs) kernels are placed on those cross-sections, thus building an intermediate model that is utilised to extrapolate the positions of the remaining nodes in the full model. We demonstrate in this work that this process yields accurate results on representative aircraft structures when compared to simulations with the full FEM, thus paving the way for a more detailed, multidisciplinary analysis: first with the addition of CFD as the aerodynamic solver, and second with the transfer of the full deformed state back to the original FE solver to study other phenomena such as buckling. 
+
+#+NAME: workflow
+#+CAPTION: Workflow of the solution process
+#+ATTR_LATEX: :width 1.\textwidth 
+[[./figs/workflow2.pdf]]
+
+*** Dynamic condensation of linear FE models
+\label{sec:dynamic_condensation}
+Model order reduction techniques aim to increase computational efficiency by reducing the size of the problem while maintaining its fundamental characteristics. Regarding industrial applications in the field of aeroelasticity, ROMs are very important, even when the majority of the analysis is linear, due to the need for fast simulations and the very large models that can surpass the millions of DoF. In aircraft loads analysis, trim and stability studies, it is common practice condensing the (linear) full-FE models into the major load paths of the aircraft, to reduce the total number of DoF to a few hundreds. That is Step 2 in figure . Herein we not only use a condensation approach to reduce the size of the model, but also to represent a structure that can be modelled as a one-dimensional domain --making use of the slenderness of transport aircraft main components, where the span of wetted-surfaces and the fuselage length take predominance over the other dimensions.
+\\
+In order to obtain the condensed model, the degrees of freedom of the full model are divided into those on active (or master) nodes, located along the load path $\Gamma$, and those of the omitted (or slave) nodes. The displacement vector can therefore be reordered as, $\pmb{u}_n= \left(\pmb{u}_a^\top \;\pmb{u}_o^\top\right)^\top$, and similarly for the LNMs of the unloaded structure $\pmb{\Phi}=[\pmb{\Phi}_a^\top \; \pmb{\Phi}_o^\top]^\top$, so that the eigenvalue problem of $\bm{K}$ and $\bm{M}$ is arranged as,
+
+\begin{equation}
+\left( \begin{bmatrix}
+\bm{K}_{aa} & \bm{K}_{ao} \\ \bm{K}_{oa} & \bm{K}_{oo}
+\end{bmatrix} - \omega^2\begin{bmatrix}
+\bm{M}_{aa} & \bm{M}_{ao} \\ \bm{M}_{oa} & \bm{M}_{oo}
+\end{bmatrix}
+\right)
+\begin{pmatrix}
+\bm{\Phi}_a \\ \bm{\Phi}_o
+\end{pmatrix} = 0
+\end{equation}
+A linear dependency is now assumed between the omitted and the active degrees of freedom,
+
+\begin{equation}\label{eq2:Toa}
+\pmb{\Phi}_o =  \pmb{T}_{oa} \pmb{\Phi}_a
+\end{equation}
+with $\pmb{T}_{oa} \in \mathbb{R}^{o\times a}$ the transformation matrix between both sets.
+The quality of the transformation is determined by its accuracy in capturing a subset of interest of the full-system LNMs, which is linked to the spatial sampling that $\pmb{\Phi}_a$ introduces on the full domain.
+In general, the condensation is dependent on the frequencies and forms a nonlinear eigenvalue problem where each LNM,  with natural frequency, $\omega_j$, has one transformation matrix,
+
+\begin{equation}\label{eq2:transformation_exact}
+\pmb{T}_{oa}(\omega_j) = (\pmb{K}_{oo}-\omega^2_j \pmb{M}_{oo})^{-1}( \pmb{K}_{oa}- \omega_j^2 \pmb{M}_{oa}) \approx -(\pmb{K}_{oo}^{-1}+\omega^2_j\pmb{K}_{oo}^{-1}\pmb{M}_{oo}\pmb{K}_{oo}^{-1})(\pmb{K}_{oa}-\omega^2_j\pmb{M}_{oa})
+\end{equation}
+This is the so-called exact-condensation matrix, where we have also introduced Kidder's mode expansion cite:&Qu2010 as [[cite:&CEA2021b]]. The first-order approximation of this equation is attained by letting $\omega_j =0$, thereby removing inertia effects. This results in a static condensation, proposed by Guyan and Irons in 1965 [[cite:&Guyan1965]], still one of the most popular condensation methods today, also known as Guyan reduction. Note that when the mass model consists only of lumped masses on the active degrees of freedom, $\pmb{M}_{oo} = \pmb{M}_{oa} = \pmb{0}$, Guyan reduction is the exact condensation.
+
+*** Kinematics of aircraft main load-paths
+This process of enhancing the linear 3D model with geometric nonlinearities along the slender dimension relies on the main assumption that cross-sectional deformations of the solid body in the reference configuration are not coupled to the main dimension as moving through configurations in time. As a result, distributed internal stresses act only through the normal of the cross-sections in the undeformed configuration \cite{CEA2021a}.
+Applying the appropriate integration over the cross sectional reference area of the distributed traction forces, a Cosserat rod model is built, where the deformed state on the full domain is approximated by a deformable space curve $\mathcal{P}$ -- identified with the aircraft major load-paths. The primary variables  are the local inertial (linear and angular) velocities, grouped in the variable $\bm{x}_1(s, t)$, and internal force and moments combined in $\bm{x}_2(s, t)$. They are function of the 1D spatial dimension, $s$, and time, $t$. 
+Applied forces and moments per unit length, $\bm{f}_1$, come naturally as follower forces and moments respectively. The equations are well described in \cite[Ch. 8]{PALACIOS2023}.
+
+Constitutive properties are given by the compliance matrix, $\bm{\mathcal{C}}$, relating sectional forces and moments to strains and curvatures and the sectional mass matrix, $\bm{\mathcal{M}}$, linking velocities and momenta. Finding a good approximation to these matrices is a common challenge in formulations that aim to build nonlinear 1D models from full FE models. This work circumvents having to calculate explicit expressions of $\bm{\mathcal{C}}$ and $\bm{\mathcal{M}}$ by solving the equations in modal space and linking them to the modal shapes and their derivatives as first described in cite:&PALACIOS2012.
+
+\begin{subequations}\label{eq2:intrinsic_eqs}
+\begin{align}
+\mathcal{M}\dot{\pmb{x}}_1-\pmb{x}_2'-\pmb{\mathsf{E}}\bm{x}_2+ \lo_1(\pmb{x}_1)\mathcal{M}\pmb{x}_1 + \lo_2(\pmb{x}_2)\mathcal{C}\pmb{x}_2 & = \pmb{f}_1  \\
+\mathcal{C}\dot{\pmb{x}_2}-\pmb{x}_1' + \pmb{\mathsf{E}}^\top\pmb{x}_1- \lo_1^\top(\pmb{x}_1)\mathcal{C}\pmb{x}_2 & = \pmb{0}
+\end{align}
+\end{subequations}
+The linear operators, $\lo_1$, $\lo_2$, and the matrix $\pmb{\mathsf{E}}$ are defined as,
+\begin{equation}
+\lo_1 (\pmb{x}_1)  = \begin{bmatrix} \tilde{\pmb{\omega}} & \pmb{0} \\ \tilde{\pmb{\ve}} & \tilde{\pmb{\omega}} \end{bmatrix} \hspace{0.5cm} ; \hspace{0.5cm}
+\lo_2 (\pmb{x}_2)=  \begin{bmatrix} \pmb{0} & \tilde{\pmb{f}} \\ \tilde{\pmb{f}} & \tilde{\pmb{m}} \end{bmatrix} \hspace{0.5cm} ; \hspace{0.5cm}  \pmb{\mathsf{E}}= \lo_1 \begin{pmatrix} \begin{bmatrix} 1 \\ \bm 0_5 \end{bmatrix} \end{pmatrix}
+\end{equation}
+The above description is geometrically-exact with quadratic nonlinearities only. It easily allows 
+
+
+The intrinsic modes are introduced and the projection of the state variables is such  $\pmb{x}_1 = \pmb{\phi}_1\pmb{q}_1$ and $\pmb{x}_2 = \pmb{\phi}_2\pmb{q}_2$.
+
+
+and the equations of motion take the following form:
+
+\begin{equation}
+\label{eq2:sol_qs}
+\begin{split}
+\dot{\pmb{q}}_{1} &=  \pmb{\omega} \odot  \pmb{q}_{2} - \pmb{\Gamma}_{1} \pmb{:} \left(\pmb{q}_{1} \otimes \pmb{q}_{1} \right) - \pmb{\Gamma}_{2} \pmb{:} \left( \pmb{q}_{2} \otimes  \pmb{q}_{2} \right) + \bm{\eta}  \\
+\dot{\pmb{q}}_{2} &= -\pmb{\omega} \odot \pmb{q}_{1} + \pmb{\Gamma}_{2}^{\top} \pmb{:} \left( \pmb{q}_{2} \otimes  \pmb{q}_{1} \right)
+\end{split}
+\end{equation}
+
+where $\odot$ is the  Hadamard product (element-wise multiplication), $\otimes$ is the tensor product operation and $\pmb{:}$ is the double dot product[fn:1: The double dot product represents a contraction of the last two indexes of the first tensor with the first two indexes of the second one; it however needs further specification as two alternative definitions can be adopted and here we opt for the following: \(\pmb{a} \pmb{:} \pmb{b} = a_{..ij} b_{ij..} \). This has implications on the definition of the transpose of \(\bm{\Gamma}_2 \) in the second equation since for high order tensors multiple transpose operators can be defined. Consistency is achieved by ensuring the dot product operation satisfies the following: \( \pmb{x} \cdot \left(\bm{\Gamma} \pmb{:} \left( \pmb{y} \otimes \pmb{z} \right)  \right) = \pmb{y} \cdot \left(\bm{\Gamma}^{\top} \pmb{:} \left(\pmb{z} \otimes \pmb{x} \right)  \right) \), which leads to the transpose of the third order tensor, \( \bm{\Gamma} = \Gamma^{ijk} \), as \( \bm{\Gamma}^{\top} = \Gamma^{jki} \).].
+The form of the equations in compact tensorial notation is in fact the way they have been implemented and vectorised. This description is geometrically-exact, with nonlinearities encapsulated in the modal couplings of the third-order tensors $\pmb{\Gamma}_{1}$ and $\pmb{\Gamma}_{2}$ (the former introduces the gyroscopic terms in the dynamics and the latter introduces the strain-force nonlinear relation). $\pmb{\eta}$ is the modal projection of the external forcing terms. They are computed as integrals along the load-path 1D domain as an inner product: $\langle \pmb{u},\pmb{v}  \rangle = \int_\Gamma \pmb{u}^\top \pmb{v} ds$, for any $\pmb{u}\in\mathbb{R}^6$ and $\pmb{v}\in\mathbb{R}^6$:
+#+begin_export latex
+\begin{align}\label{eq2:gammas12}
+\Gamma_{1}^{ijk} & = \langle \pmb{\phi}_{1i}, \lo_1(\pmb{\phi}_{1j})\pmb{\psi}_{1k}\rangle, \nonumber \\
+\Gamma_{2}^{ijk} & = \langle \pmb{\phi}_{1i}, \lo_2(\pmb{\phi}_{2j})\pmb{\psi}_{2k}\rangle,  \\
+\eta_{i} & = \langle \pmb{\phi}_{1i}, \pmb{f}_1\rangle  \nonumber
+\end{align}
+#+end_export
+where $\lo_1$ and $\lo_2$ are linear operators, $\pmb{\psi}_1 = \bm{\mathcal{M}}\pmb{\phi}_1$ and $\pmb{\psi}_2 = \bm{\mathcal{C}}\pmb{\phi}_2$ are also cast as momentum and strain mode shapes and approximated using the Linear Normal Modes of the FE model. In other words, each natural vibration mode can be uniquely expressed in terms of velocity, force/moment, momentum, or strain variables. While those would be redundant in a conventional linear vibration analysis, they will enable to identify all the coefficients in Eqs. \eqref{eq2:sol_qs}.
+
+** Time domain unsteady aerodynamics
+
+The doublet-lattice-method (DLM) \citep{rodden1969,Rodden2011book} represents a numerical solution to equation \eqref{eq3:kernel}, where the main surfaces are discretised into boxes and doublet lines placed at the quarter chord of each box or panel, while the downwash, $\hat{w}(x,y,0)$, is evaluated at the 3/4 chord midspan (note the change in notation from the previous section in the upwash, $\hat{w}_u$, and the downwash, $\hat{w}_d$, related as $\hat{w}_u  = - \hat{w}_d$ depending on a re
+
+A rational-function approximation (RFA) is used to transform the frequency-domain physics into the time-domain, based on the classical method by Roger \citep{Roger1977}. Accordingly, the GAFs in Eq. \eqref{eq3:eta_ah} are approximated here for a given Mach number as,
+\begin{equation}\label{eq3:rogers_approx}
+\bm{Q}_{HH}(k) = \pmb{\mathcal{A}}_0 + (ik)\pmb{\mathcal{A}}_1 + (ik)^2\pmb{\mathcal{A}}_2 + \sum_{p=1}^{N_p}\frac{ik}{\gamma_p + ik}\pmb{\mathcal{A}}_{p+2}
+\end{equation}
+$\pmb{\mathcal{A}}_0$ is just $\bar{\bm{Q}}_{HH}(0)$. For a set of reduced frequencies $k_n$ and a fixed Mach number, $\bar{\bm{Q}}_{HH}(k_n)\in\mathbb{R}^{N_m\times N_m}$ matrices are computed and the $\pmb{\mathcal{A}}_i$ obtained through a least square fit after the following system is formed,
+
+
+
+# Each of those three representations has been adopted by a modelling approach in unsteady aerodynamics \cite{palacioscea2023}. The doublet-lattice method \cite{Albano1969} is a transfer function approach. The unsteady vortex lattice method \cite{Katz2001} is a state-space approach and system identification approaches from CFD often use impulse response methods \cite{Silva2017}. 
+
+
+The first three terms are known as aerodynamic stiffness, damping and inertia, respectively, and the terms in the expansion are known as aerodynamic lags, which describe an exponential decay response under step function. All matrices on the right hand-side of \eqref{eq:roger} are real.
+
+A similar approach is followed to include gust loads. The (dimensional) frequency-domain upwash, $\bar{w}_{g}$, on a panel $j$ is 
+%
+\begin{equation}
+\bar{w}_{gj}(\omega) = \left(\bm{n}_j \cdot {\bar{\bm{v}}_g}\right) e^{-i\omega(\bm{x}_j-\bm{x}_0)/U_\infty}
+\end{equation}
+where $\bm{n}_j $ is the normal to panel $j$, $\bm{v}_g(t)$ is the velocity vector of the gust (usually with non-zero components in the z-direction for a normal gust and in y-direction for a lateral gust), $\bm{x}_j$ are the spatial coordinates of the control point in panel $j$, and $\bm{x}_0$ the position of the gust origin. The normal of each panel could be updated as the structure deforms for a complete nonlinear analysis of the gust. However this would entail updating a complex panel geometry for a very short period of time and it is deemed a second order effect here, so no updating of $\bm{n} \cdot \bm{v}_g$ has been implemented so far. In particular, ''1-cos'' gust profiles are considered.
+
+The GAFs due to the gust $\textbf{v}_g/U_\infty$ can be then written as 
+\begin{equation}
+\AIC_g(p)=\AIC_{g0}+\textbf{C}_g\left(p\textbf{I}-\textbf{A}_g\right)^{-1}\textbf{B}_g
+\end{equation}
+
+
+For gust response analysis the approach introduced in \cite{Kier2009} is followed, so a RFA on $\bar{\bm{Q}}_{HJ}$ is carried out allowing the definition of any upwash function and preventing the spiral nature of the gust problem when approximating directly $\bar{\bm{Q}}_{HJ} \bar{w}_{gj}$. The force in the frequency domain due to a spanwise homogeneous gust is
+
+\begin{equation}
+\bar{\eta}_{gust}(\omega) = \frac12 \rho_\infty U_\infty^2  \bar{\bm{Q}}_{HJ}(\omega)\bar{w}_{gj}(\omega)
+\end{equation}
+
+The forces in nondimensional  time, $t_s = \frac{U_\infty t}{c/2}$, are obtained after applying the inverse Fourier transform to Roger's approximation, Eq. \eqref{eq3:rogers_approx}, and to the definition of the aerodynamic states, Eq. \eqref{eq3:rogers_approx_poles}. The final expression for the aerodynamic modal forces and states in time domain are,
+
+\begin{align}
+\bm{\eta}_a &= \tfrac12\rho U_\infty^2 \left( \pmb{\mathcal{A}}_0\bm{q}_0 +\frac{c}{2U_\infty}\pmb{\mathcal{A}}_1 \bm{q}_1 +\left(\frac{c}{2U_\infty}\right)^2 \pmb{\mathcal{A}}_2\dot{\bm{q}}_1 + \sum_{p=1}^{N_p} \pmb{\lambda}_p\right)  \\
+ \dot{\bm{\lambda}}_p &= -\frac{2U_\infty \gamma_p }{c}\bm{\lambda}_p +  \pmb{\mathcal{A}}_{p+2}\bm{q}_1 
+ \qquad \textup{for} \qquad p=1,\ldots,N_p
+\end{align}
+
+\begin{equation}\label{eq3:eta_full}
+\begin{split}
+\bm{\eta}_a = \tfrac12\rho_\infty U_\infty^2 & \left(\vphantom{\sum_{p=1}^{N_p}} \pmb{\mathcal{A}}_0\bm{q}_0 +\frac{c}{2U_\infty}\pmb{\mathcal{A}}_1 \bm{q}_1 +\left(\frac{c}{2U_\infty}\right)^2 \pmb{\mathcal{A}}_2\dot{\bm{q}}_1   \right.  \\
+& \left. + \pmb{\mathcal{A}}_{g0}\bm{v}_g +\frac{c}{2U_\infty}\pmb{\mathcal{A}}_{g1} \dot{\bm{v}}_g +\left(\frac{c}{2U_\infty}\right)^2 \pmb{\mathcal{A}}_{g2}\ddot{\bm{v}}_g +  \sum_{p=1}^{N_p} \pmb{\lambda}_p  \right) 
+\end{split}
+\end{equation}
+
+
+The term $\bm{q}_0$ is the displacement modal amplitude and $\bm{q}_1$ is the velocity modal amplitude, as given by eq. \eqref{eq2:q1-q0}; note both displacement and velocity amplitudes are used to define the inputs to the aerodynamic subproblem. For convenience in the formulation the aerodynamic states are rescaled with the dynamic pressure such as $\bm{\lambda}_p \rightarrow \frac12\rho U_\i
+
+** Nonlinear aeroelastic system
+The full aeroelastic solution is described extending Eq.  \eqref{eq2:sol_qs} with gravity forces, $\bm{\eta}_g$, aerodynamic forces and gust disturbances, $\bm{v}_g$. Control states can also be included [[cite:&CEA2021a]], but they are not necessary for this work. For a set of reduced frequencies and a given Mach number, the DLM (or a higher fidelity aerodynamic method) yields the Generalised Aerodynamic Forces (GAFs). The current implementation uses Roger's rational function approximation to those GAFs, which results in the follower modal forces:
+
+
+The coupling of the structure and aerodynamic equations combined with the aerodynamic lags gives the final ODE system: 
+
+\begin{equation}
+\label{eq2:sol_qs}
+\begin{split}
+\dot{\pmb{q}}_{1} &=  \hat{\pmb{\Omega}}  \pmb{q}_{2} - \hat{\pmb{\Gamma}}_{1} \pmb{:} \left(\pmb{q}_{1} \otimes \pmb{q}_{1} \right) - \hat{\pmb{\Gamma}}_{2} \pmb{:} \left( \pmb{q}_{2} \otimes  \pmb{q}_{2} \right) + \hat{\bm{\eta}}  \\
+\dot{\pmb{q}}_{2} &= -\pmb{\omega} \odot \pmb{q}_{1} + \pmb{\Gamma}_{2}^{\top} \pmb{:} \left( \pmb{q}_{2} \otimes  \pmb{q}_{1} \right) \\
+\dot{\bm{\lambda}}_{p} &= \hat{\bm{\mathcal{A}}}_{p+2}\pmb{q}_{1}
+                       + \hat{\bm{\mathcal{A}}}_{p+2}\dot{\pmb{v}}_g
+                       -\frac{2U_\infty\gamma_p}{c}\bm{\lambda}_{p}
+\end{split}
+\end{equation}
+in this system the aerodynamic added-mass effect has been moved to the left hand side such that $\bm{\mathrm{A}}_2 = (\pmb{I} - \frac{\rho c^2}{8}\pmb{\mathcal{A}}_2)^{-1}$, and it couples all DoF in $\pmb q_1$. Thus the natural frequency terms become $\hat{\pmb{\Omega}} = \bm{\mathrm{A}}_2 \textup{diag}(\pmb{\omega})$ and the nonlinear terms $\hat{\pmb{\Gamma}} = \bm{\mathrm{A}}_2 \bm{\Gamma}$. The effect of all external forces, aero, $\bm{\eta}_a$, gravity, $\bm{\eta}_g$, and others, $\bm{\eta}_f$, are combined in such that $\hat{\bm{\eta}} = \bm{\mathrm{A}}_2 \left( \left( \bm{\eta}_a - \frac{\rho c^2}{8} \pmb{\mathcal{A}}_2\dot{\bm{q}}_1 \right) +  \bm{\eta}_g + \bm{\eta}_f \right)$. \\
+Note that the structure of the formulation in modal space naturally leads to reduced order models and easily caters for vectorised operations. For instance, the contraction of $\bm \Gamma_2^T{\top}$ in the second equation of Eqs. \ref{eq2:sol_qs} is implemented as an Einstein summation in JAX as \texttt{einsum(ijk,ki->j, gamma2, tensordot(q2, q1, axes=0)}. This will be briefly discussed next.
+
+* Examples
+:PROPERTIES:
+:header-args: :mkdirp yes  :session (print pythonShell) :noweb yes :tangle ./results/examples.py :eval (print Veval_blocks) :exports (print export_blocks) :comments both
+:END:
+The cases presented are a demonstration of our solution approach to manage geometric nonlinearities, the accuracy of the solvers when compared to full FE simulations, and the computational gains that can be achieved.
+All computations are carried out on a single core of the same CPU, an i7-6700 with 3.4 GHz clock speed.
+# The previous version of the code based on Python was not optimised and made heavy use of for-loops instead of vectorised operations. The main reason to show those previous results is to highlight the potential improvements in scientific software when paying attention to the implementation solely.
+** Structural verification of a representative configuration
+\label{sec:representative_aircraft}
+A representative FE model for aeroelastic analysis of a full aircraft without engines is used to demonstrate the capabilities of the current methodology on large finite-element models. The aircraft’s main wing is composed of wing surfaces, rear and front spars, wing box and ribs. Flexible tail and rear stabiliser are rigidly attached to the wing. Structural and aerodynamic models are shown in Fig. \ref{fig:SailPlane}. This is a good test case as it is not very complex yet representative of aircraft FE models and it is available open source.  
+#+begin_export latex
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.9\textwidth]{./figs/SailPlane2}
+\caption{Sail Plane structural and aerodynamic models}\label{fig:SailPlane}
+\end{figure}
+#+end_export
+*** Geometrically nonlinear static response
+The static equilibrium of the aircraft under prescribed loads is first studied with follower loads normal to the wing applied at the tip of each wing. The response for an increasing load stepping of 200, 300, 400, 480 and 530 KN is computed. Nonlinear static simulations on the original full model (before condensation) are also carried out in MSC Nastran and are included. The interpolation elements in Nastran are used to output the displacements at the condensation nodes for direct comparison with the NMROM results. To quantify the difference between both sets of results, tip displacements, in global coordinates, for the 530 KN load and the full model Nastran calculations are $u_x = -0.217$ m  $u_y = -1.348$ m, $u_z = 7.236$ m; while NMROM calculations yield $u_x = -0.219$ m  $u_y = -1.352$ m, $u_z = 7.249$ m. This represents an error of 0.19$\%$ for a 25.6$\%$ tip deformation of the wing semi-span, $b = 28.8$ m.
+Geometric nonlinearities are better illustrated by representing a sectional view of the wing as in Fig. [[fig:SPWingsection]], where deformations in the z-direction versus the metric $S = \sqrt{x^2+y^2}$ are shown. MSC Nastran linear solutions are also included to appreciate more clearly the shortening and follower force effects in the nonlinear computations.
+
+#+NAME: SPWingsection
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  import fem4inas.preprocessor.configuration as configuration
+  config = configuration.Config.from_file("SP1/config.yaml")
+  sol_sp= [solution.IntrinsicReader(f"./SP{i}") for i in range(1,6)]
+  r_sp0, r_sp, r_spn, r_spnl = fn_spWingsection(sol_sp, config)
+  fig, figname = fig_out(name)(plot_spWingsection)(r_sp0, r_sp, r_spn, r_spnl)
+  figname
+#+end_src
+
+#+NAME: fig:SPWingsection
+#+CAPTION: Static geometrically-nonlinear effects on the aircraft main wing 
+#+ATTR_LATEX: :width 0.8\textwidth 
+#+RESULTS: SPWingsection
+[[file:figs/SPWingsection.png]]
+
+The tolerance in the Newton solver was set to $10^{-6}$ in all cases. A convergence analysis with the number of modes in the solution is presented in [[SPstatic_convergence]].
+5, 15, 30, 50, 100 modes are used to build the corresponding NMROMs.
+The error metric is defined as the L-2 norm divided by the total number of nodes (only the condenses ones in this case): $\epsilon = ||u_{NMROM} - u_{NASTRAN}||/NumNodes$.
+#+NAME: SPerror
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  import fem4inas.preprocessor.configuration as configuration
+  config = configuration.Config.from_file("SP1/config.yaml")
+  sol_sp= [solution.IntrinsicReader(f"./SP{i}") for i in range(1,6)]
+  sp_error = fn_spError(sol_sp, config, print_info=True)
+  fig, figname = fig_out(name)(fn_spPloterror)(sp_error)
+  figname
+#+end_src
+
+#+NAME: SPstatic_convergence
+#+CAPTION: Modal convergence in the static solution of the Sail Plane
+#+ATTR_LATEX: :width 0.4\textwidth 
+#+RESULTS: SPerror
+[[file:figs/SPerror.png]]
+
+The 3D structural response has been reconstructed using the approach in [[workflow]].
+The nodes connected by the interpolation elements (RBE3s) to the ASET solution are reconstructed first and subsequently a model with RBFs kernels is used to extrapolate to the rest of the nodes in the full FE.
+A very good agreement is found against the Nastran 400 solution. 
+Fig. [[SPstatic_3D]]  shows the overlap in the Nastran solution (in blue) and the NMROM (in red) for the 530 KN loading.
+
+#+NAME: SPstatic_3D
+#+CAPTION: Static 3D Solution for a solution with 50 modes and 530 KN loading
+#+ATTR_LATEX: :width 0.8\textwidth 
+[[./figs/SP_3Dloading-front2.png]]
+[[./figs/SP_3Dloading-side.png]]
+
+The error metric of this 3D solution is also assessed in Fig. [[fig:SPerror3D]], for the solution with 50 modes and comparing with the previous error metric in the ASET model. The discrepancy metric is even smaller, which is explained because there are more nodes in the 3D model that reduced the average per node. The important point is that there is no accuracy loss in the process of reconstructing the 3D solution.  
+
+#+NAME: SPerror3D
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  sp_error1D = [sp_error[f'M4_L{i}'] for i in range(6)]
+  fig, figname = fig_out(name)(fn_spPloterror3D)(sp_error1D, sp_error3d)
+  figname
+#+end_src
+
+#+NAME: fig:SPerror3D
+#+CAPTION: 3D discrepancy comparison between full FE and NMROM solutions
+#+ATTR_LATEX: :width 0.8\textwidth 
+#+RESULTS: SPerror3D
+[[file:figs/SPerror3D.png]]
+
+Next we compare the computational times for the various solutions presented in this section in Table [[table:SP_times]]. 
+#+NAME: SP_times
+#+begin_src python  :results raw
+  dfruns = pd.read_csv('./run_times.csv',index_col=0).transpose()
+  values = ["Time [s]"]
+  values += [', '.join([str(round(dfruns[f'SP{i+1}'].iloc[0], 2)) for i in range(5)])]
+  values += [1*60*60 + 22*60]
+  header = ["NMROM (modes: 5, 15, 30, 50, 100)"]
+  header += ["NASTRAN 400"]
+  # df_sp = pd.DataFrame(dict(times=TIMES_DICT.values()),
+  #                         index=TIMES_DICT.keys())
+
+  # df_ = results_df['shift_conm2sLM25']
+  # df_ = df_.rename(columns={"xlabel": "%Chord"})
+  tabulate([values], headers=header, tablefmt='orgtbl')
+#+end_src
+
+#+NAME: table:SP_times
+#+CAPTION: Computational times Sail Plane static solution
+#+ATTR_LATEX: :width 0.7\textwidth :environment longtable :caption  
+#+RESULTS: SP_times
+|          | NMROM (modes: 5, 15, 30, 50, 100) | NASTRAN 400 |
+|----------+-----------------------------------+-------------|
+| Time [s] | 6.88, 6.98, 6.94, 7.42, 7.79      |        4920 |
+
+
+In order to validate the AD a whereby the load stepping shown above becomes a pseudo-time interpolation load where the variable $\tau$ controls the amount of loading and we look at the variation of the tip displacement as a function of this $\tau$.
+Table [[table:SP_AD]] shows a very good agreement with a finite differences with an epsilon of $10^{-3}$. 
+#+NAME: table:SP_AD
+#+CAPTION: Computational times Sail Plane static solution
+#+ATTR_LATEX: :width 0.7\textwidth :environment longtable :caption  
+| $\tau$ | $f(\tau)$   | $f'(\tau)$ [AD]   | $f'(\tau)$ [FD]   |
+|--------+-------------+-------------------+-------------------|
+|    1.5 | 2.81 m      |             0.700 |             0.700 |
+|    3.5 | 4.527 m     |             1.344 |             1.344 |
+|    5.5 | 6.538 m     |             0.623 |             0.623 |
+
+*** Large-amplitude nonlinear dynamics
+This test case demonstrates the accuracy of the NMROM approach for  dynamic geometrically-nonlinear calculations and was first introduced in [[cite:&CEA2021]]. The right wing of Fig. \ref{fig:SailPlane} is considered and dynamic nonlinear simulations are carried out  and compared to MSC Nastran linear and nonlinear analysis (SOL 109 and 400, respectively) on the full FE model. First 
+
+
+A force is applied at the wing tip with a triangular loading profile, followed by a sudden release of the applied force to heavily excite the wing. The force profile is \(f(a, b) =  a+\frac{1-a}{b}t \text{if \(t \leq b\) else 0.}\) and the force at the tip is $f_{tip} = [-2\times 10^5, 0., 6\times 10^5]f(0.05, 4)$.
+The dynamic response is presented in Fig. [[fig:WSP_x]], where results have been normalised with the wing semi-span (28.8 m.). As expected, linear analysis over predicts vertical displacements and does not capture displacements in the $x$ and $y$ directions. NMROMs were built with 5, 15, 30, 50 and 100 modes. A Runge-Kutta four is used to march the equation in time with time steps corresponding to the inverse of the largest eigenvalue in the NMROM, i.e.  
+
+#+NAME: WSP_x
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  sol_wsp= [solution.IntrinsicReader(f"./WSP{i}") for i in range(1,6)]
+  fig, figname = fig_out(name)(wsp_wingtip)(sol_wsp, dim=0, labels=None, nast_load=0)
+  figname
+#+end_src
+
+#+NAME: fig:WSP_x
+#+CAPTION: Span-normalised tip $x-$displacements
+#+RESULTS: WSP_x
+[[file:figs/WSP_x.png]]
+
+#+NAME: WSP_y
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(wsp_wingtip)(sol_wsp, dim=1, labels=None, nast_load=0)
+  figname
+#+end_src
+
+#+CAPTION: Span-normalised tip $y-$displacements
+#+RESULTS: WSP_y
+[[file:]]
+
+#+NAME: WSP_z
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(wsp_wingtip)(sol_wsp, dim=2, labels=None, nast_load=0)
+  figname
+#+end_src
+
+#+CAPTION: Span-normalised tip $z-$displacements
+#+RESULTS: WSP_z
+[[file:figs/WSP_z.png]]
+
+#+CAPTION: Span-normalised tip $z-$displacements zoom-in
+#+NAME: WSP_zzoom
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(wsp_wingtip)(sol_wsp, dim=2, labels=None, nast_load=0,axes=[[3.85,4.15],[27.4, 27.65]])
+  figname
+#+end_src
+
+#+RESULTS: WSP_zzoom
+[[file:figs/WSP_zzoom.png]]
+
+
+As in the previous example, the 3D shape of the model is retrieved and compared against the full nonlinear dynamic solution as illustrated in Fig. [[wsp_3d]] (Nastran solution in yellow and NMROM with 50 modes in blue). 
+
+#+NAME: wsp_3d
+#+CAPTION: Wing Sail Plane 3D dynamic comparison
+#+ATTR_LATEX: :width 1\textwidth 
+[[./figs/WSP_3D-front.png]]
+
+Next we look at the error of the dynamic simulation with the same error metric employed above that now evolves in time. Integrator errors accumulate and discrepancies grow with time but still remain small. 
+#+NAME: WSP_error
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  wsp_error = fn_wspError(sol_wsp)
+  wsp_error_time = jnp.linspace(0,15,10001)
+  fig, figname = fig_out(name, update_layout=dict(showlegend=False, margin=dict(
+                                autoexpand=True,
+                                l=0,
+                                r=5,
+                                t=2,
+                                b=0)))(fn_wspPloterror3D)(wsp_error_time,wsp_error3d)
+  figname
+#+end_src
+
+#+CAPTION: L-2 norm per node differences between Nastran full FE and NMROM 
+#+RESULTS: WSP_error
+[[file:figs/WSP_error.png]]
+
+An impressive reduction of computational time is achieved in the new implementation as highlighted in Table [[table:WSP_times]].
+
+
+with a small time step of 0.001 seconds takes \textbf{10.9 seconds} while the nonlinear response of the full model in \textbf{Nastran took 1 hour 22 minutes.}
+
+
+#+NAME: WSP_times
+#+begin_src python  :results raw
+  dfruns = pd.read_csv('./run_times.csv',index_col=0).transpose()
+  values = ["Time [s]"]
+  values += [', '.join([str(round(dfruns[f'WSP{i+1}'].iloc[0], 2)) for i in range(5)])]
+  values += [1*60*60 + 22*60]
+  header = ["NMROM (modes: 5, 15, 30, 50, 100)"]
+  header += ["NASTRAN 400"]
+  # df_sp = pd.DataFrame(dict(times=TIMES_DICT.values()),
+  #                         index=TIMES_DICT.keys())
+
+  # df_ = results_df['shift_conm2sLM25']
+  # df_ = df_.rename(columns={"xlabel": "%Chord"})
+  tabulate([values], headers=header, tablefmt='orgtbl')
+#+end_src
+
+#+NAME: table:WSP_times
+#+CAPTION: Computational times Sail Plane dynamic solution
+#+ATTR_LATEX: :width 0.7\textwidth :environment longtable :caption  
+#+RESULTS: WSP_times
+|          | NMROM (modes: 5, 15, 30, 50, 100) | NASTRAN 400 |
+|----------+-----------------------------------+-------------|
+| Time [s] | 2.81, 3.21, 5.08, 7.33, 145.27    |        4920 |
+
+
+
+#+NAME: table:AD_WSP
+#+CAPTION: AD comparison
+#+ATTR_LATEX: :width 0.7\textwidth :environment longtable :caption  :align center
+| $\alpha$ | $f(\alpha)$          | $f'(\alpha)$ [AD]     | $f'(\alpha)$ [FD]     |
+|----------+----------------------+-----------------------+-----------------------|
+|      0.5 | $1723.2 \times 10^3$ | $3587.71 \times 10^3$ | $3587.77 \times 10^3$ |
+|      1.0 | $3624.4 \times 10^3$ | $3735.26 \times 10^3$ | $3735.11 \times 10^3$ |
+|      1.5 | $5608.3 \times 10^3$ | $3957.81 \times 10^3$ | $3958.31 \times 10^3$ |
+
+** Dynamic loads on an industrial configuration
+The studies presented in this section are based on a reference configuration developed to industry standards known as XRF1, which is representative of a long-range wide-body transport airplane. The version with a wing-tip extension in \cite{CEA2023} is employed to verify a gust response against NASTRAN linear solution.
+Fig. \ref{fig8:xrf1-model} shows the full aeroelastic model split up into the structural, mass and aerodynamic components. The FE model contains a total of around 177400 nodes, which are condensed into 176 active nodes along the reference load axes through interpolation elements. A Guyan or static condensation approach is used for the reduction. 
+The aerodynamic model contains \(\sim 1,500\) aerodynamic panels.
+
+#+begin_export latex
+\begin{figure}[th!]
+\centering
+\includegraphics[width=1.\textwidth]{./file:figs/xrf1-model.pdf}
+\caption{Modified XRF1 aeroelastic subcomponents}\label{fig8:xrf1-model}
+\end{figure}
+#+end_export
+A verification exercise is introduced first by applying two 1-cos gust shapes at a very low intensity, thus producing small deformations and a linear response. The flow Mach number is 0.81. A first gust is applied that we name as G1 of length 67 m and peak velocity 0.141 m/s, and a second gust, G2, of 165 m and peak velocity of 0.164 m/s.
+Fig. [[fig:GustXRF12_x]] shows the normalised wing-tip response with our NMROM that accurately reproduces the Nastran 146 solution based on the full FE model.
+
+#+NAME: GustXRF12_x
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  sol1= solution.IntrinsicReader("./XRF1")
+  sol2= solution.IntrinsicReader("./XRF2")
+  fig, figname = fig_out(name)(xrf1_wingtip2)(sol1, sol2, labels=[2,6], dim=0, nast_scale=0.01, nast_load=[2,6])
+  figname
+#+end_src
+
+#+NAME: fig:GustXRF12_x
+#+CAPTION: Wing-tip response to low intensity gust
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF12_x
+[[file:figs/GustXRF12_x.png]]
+
+#+NAME: GustXRF12_y
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(xrf1_wingtip2)(sol1, sol2, labels=[2,6],dim=1, nast_scale=0.01, nast_load=[2,6])
+  figname
+#+end_src
+
+#+NAME: fig:GustXRF12_y
+#+CAPTION: $y$ Wing-tip response to low intensity gust
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF12_y
+[[file:figs/GustXRF12_y.png]]
+
+#+NAME: GustXRF12_z
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(xrf1_wingtip2)(sol1, sol2, labels=[2,6],dim=2, nast_scale=0.01, nast_load=[2,6])
+  figname
+#+end_src
+
+#+NAME: fig:GustXRF12_z
+#+CAPTION: $z$ Wing-tip response to low intensity gust
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF12_z
+[[file:figs/GustXRF12_z.png]]
+
+Next we increase the gust intensity by a factor of 200 in order to show the effects of geometric nonlinearities that are only captured by the nonlinear solver. As seen in Fig. [[fig:GustXRF34_x]], there are major differences in the $x$ and $y$ components of the response due to follower and shortening effects, and a slight reduction in the $z$-component. These are well known geometrically nonlinear effects, the main contribution here is the ability to add them to an existing linear Nastran model with industrial features.   
+
+#+NAME: GustXRF34_x
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  sol1= solution.IntrinsicReader("./XRF3")
+  sol2= solution.IntrinsicReader("./XRF4")
+  fig, figname = fig_out(name)(xrf1_wingtip2)(sol1, sol2, labels=[2,6],dim=0, nast_scale=2, nast_load=[2,6])
+  figname
+#+end_src
+
+#+NAME: fig:GustXRF34_x
+#+CAPTION: Wing-tip response to high intensity gust, $x-$ component
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF34_x
+[[file:figs/GustXRF34_x.png]]
+
+#+NAME: GustXRF34_y
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(xrf1_wingtip2)(sol1, sol2, labels=[2,6],dim=1, nast_scale=2, nast_load=[2,6])
+  figname
+#+end_src
+
+#+CAPTION: Wing-tip response to high intensity gust, $y-$ component
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF34_y
+[[file:figs/GustXRF34_y.png]]
+
+#+NAME: GustXRF34_z
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(xrf1_wingtip2)(sol1, sol2, labels=[2,6],
+                                              dim=2, nast_scale=2, nast_load=[2,6])
+  figname
+#+end_src
+
+#+CAPTION: Wing-tip response to high intensity gust, $z-$component
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF34_z
+[[file:figs/GustXRF34_z.png]]
+
+In previous examples the same Runge-Kutta 4 (RK4) time-marching scheme is used and now we explore the dynamic solution with other solvers to assess their accuracy and also their computational performance. Two explicit ODE solvers, RK4 and Dormand-Prince's 5/4 method, and two implicit, Euler first order and Kvaerno's 3/2 method, are compared. In order to justify the use of implicit solvers we reduce the time step from 0.005 to 0.02 seconds, at which point both explicit solvers diverge.
+
+#+NAME: GustXRF56_x
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  sol3= solution.IntrinsicReader("./XRF3")
+  sol5= solution.IntrinsicReader("./XRF5")
+  sol7= solution.IntrinsicReader("./XRF7")
+  sol8= solution.IntrinsicReader("./XRF8")
+  fig, figname = fig_out(name)(xrf1_wingtip4)(sol3, sol5, sol7, sol8,
+                                              labels=["l3","l5","l7","l8"],
+                                              dim=0)
+  figname
+#+end_src
+
+#+NAME: fig:GustXRF56_x
+#+CAPTION: Comparison of solvers
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF56_x
+[[file:]]
+
+#+NAME: GustXRF56_y
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(xrf1_wingtip4)(sol3, sol5, sol7, sol8, labels=["l3","l5","l7","l8"],
+                                              dim=1)
+  figname
+#+end_src
+
+#+NAME: fig:GustXRF56_y
+#+CAPTION: Comparison of solvers
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF56_y
+[[file:figs/GustXRF56_y.png]]
+
+#+NAME: GustXRF56_z
+#+begin_src python :results value file  :var name=(org-element-property :name (org-element-context))
+  fig, figname = fig_out(name)(xrf1_wingtip4)(sol3, sol5, sol7, sol8, labels=["l3","l5","l7","l8"],dim=2)
+  figname
+#+end_src
+
+#+NAME: fig:GustXRF56_z
+#+CAPTION: Comparison of solvers
+#+ATTR_LATEX: :width 0.6\textwidth 
+#+RESULTS: GustXRF56_z
+[[file:figs/GustXRF56_z.png]]
+
+The computational times of the different solvers are shown in Table [[table:XRF1_times]]. The implicit solvers have taken one order of magnitude more time to run despite the reduction in time step. Therefore the insight we get on this is that for moderately large frequency dynamics, the explicit solvers offer a much efficient solution. The turning point for using implicit solvers would be when the largest eigenvalue in Eqs. \ref{eq2:sol_qs} led to prohibitly small time steps. In terms of the Nastran solution, we are not showing the whole simulation time because that would include the time to sample the DLM aerodynamics which are input into the NMROM as a post-processing step. Instead, the increase in time when adding an extra gust subcase to an already existing analysis is shown, i.e. the difference between one simulation that only computes one gust response and another with two. It is remarkable that the explicit solvers are faster on the nonlinear solution than the linear solution on an industrial software. Besides our highly efficient implementation, the main reason for this might be the Nastran solution involves a frequency domain analysis and then an inverse Fourier transform to obtain the time-domain results. 
+
+#+NAME: XRF1_times
+#+begin_src python  :results raw
+  dfruns = pd.read_csv('./run_times.csv',index_col=0).transpose()
+  values = ["Time [s]"]
+  values += [', '.join([str(round(dfruns[f'XRF{i}'].iloc[0], 2)) for i in [3,5,6,7,8]])]
+  values += [1*60*60 + 22*60]
+  header = ["NMROM [l3, l5, l6, l7, l8]" ]
+  header += ["$\Delta$ NASTRAN 146"]
+  # df_sp = pd.DataFrame(dict(times=TIMES_DICT.values()),
+  #                         index=TIMES_DICT.keys())
+
+  # df_ = results_df['shift_conm2sLM25']
+  # df_ = df_.rename(columns={"xlabel": "%Chord"})
+  tabulate([values], headers=header, tablefmt='orgtbl')
+#+end_src
+
+#+CAPTION: Computational times XRF1 gust solution.
+#+NAME: table:XRF1_times
+#+ATTR_LATEX: :width 0.7\textwidth :environment longtable :caption :center t :placement [h]
+#+RESULTS: XRF1_times
+|          | NMROM [l3, l5, l6, l7, l8]         | $\Delta$ NASTRAN 146 |
+|----------+------------------------------------+----------------------|
+| Time [s] | 22.49, 18.94, 18.8, 273.95, 847.89 |                 4920 |
+
+* Conclusions
+#+begin_comment
+This paper has presented a modal-based description that incorporates geometrically nonlinear effects due to structural slenderness onto generic FE models initially built for linear analysis. 
+While the underlying theory had already been introduced, a new implementation has been put in-place for both high-performance and software modularity, with the numerical library JAX as the engine powering the computations. 
+
+Geometrically nonlinear aeroelastic framework: Follower aerodynamic forces, geometric stiffening, coupling
+between elastic and rigid-body DoF...
+Seamlessly compatible with industrial (linear) aeroelastic models.
+Time-domain computations in near real-time with two orders of magnitude accelerations compared to
+conventional implementations.
+Fully differentiated code via Algorithmic Differentiation (AD).
+Capable on running on modern architectures, e.g. GPUs.
+
+An important remark about these computations is that the gusts have been input in the reference configuration. Undergoing updates in the implementation aim to update the gust intensity at each panel with its normal component. This will account for the added nonlinearity of the changing in downwash.
+
+Furthermore, a relevant amount of test cases accompany the software, of which a subset has been presented to illustrate the main capabilities that may range from a canonical beam undergoing extremely large deformations to a full-vehicle nonlinear aeroelastic response. A major highlight are the computational accelerations experimented which reach two orders of magnitude in dynamic analysis. This is due to the heavy use of vectorisation and just-in-time compilation.  
+The ability to recover the full 3D state from the NMROM was also demonstrated and compared to the solution in NASTRAN.  
+\\
+In the immediate future two objectives are foreseen with this implementation: first, a further assessment of the computational gains by running the examples presented here on GPUs; second and more important, the propagation of derivatives in the solution process via the Algorithmic Differentiation tool embedded in JAX. This will complete a fully differentiated aeroelastic framework that can run very efficient in modern software architectures while enhancing traditional FE models that can be very complex by construction but lack the physics of geometrically nonlinear effects. After that, increasing the fidelity in the load calculations to consider CFD-based aerodynamics would be an additional necessary step in order to achieve a more accurate nonlinear aeroelastic methodology. 
+#+end_comment
+
+bibliographystyle:plain
+# bibliography:/home/acea/Documents/Engineering.bib
+bibliography:~/Documents/Engineering.bib
+
