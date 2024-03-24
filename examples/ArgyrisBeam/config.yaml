@@ -1,0 +1,237 @@
+#  
+engine: intrinsicmodal
+fem:
+  # Connectivities of components
+  connectivity:
+    '0': []
+  # Folder in which to find Ka, Ma,
+  #     and grid data (with those names)
+  folder: /home/olivia/FEM4INAS/examples/ArgyrisBeam/FEM
+  # Condensed stiffness matrix
+  Ka_name: Ka.npy
+  # Condensed mass matrix
+  Ma_name: Ma.npy
+  # Number of modes in the solution
+  num_modes: 150
+  # Calculation of eigenvalues/vectors
+  eig_type: inputs
+  # name to load
+  #     eigenvalues/vectors in folder
+  eig_names:
+  - eigenvals.npy
+  - eigenvecs.npy
+  # Grid file or array with Nodes Coordinates, node ID in the FEM,
+  #         and associated component
+  grid: structuralGrid
+  # Tolerance for building the local frame
+  Cab_xtol: 0.0001
+  # node ID in the FEM
+  fe_order:
+  - -1
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  - 23
+  - 24
+  # fe_order starting with this index
+  fe_order_start: 0
+  # Array with component associated to each node
+  component_vect:
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+  - '0'
+driver:
+  # Driver to manage the simulation
+  typeof: intrinsic
+  # Folder path to save results
+  sol_path: results_2024-01-24_17:13:36
+  # Compute or load presimulation data
+  compute_fem: true
+  # Save presimulation data
+  save_fem: true
+
+  subcases:
+
+  supercases:
+simulation:
+  # Type of simulation
+  typeof: single
+  # Dictionary that defines which system is run after which.
+  #         The default None implies systems are run in order of the input
+  workflow:
+  # Saves the objects output by the solution
+  save_objs: false
+systems:
+  sett:
+    s1:
+      # System name
+      name: s1
+      # Type of solution to be solved
+      solution: static
+      # The simulation goal of this system
+      target: Level
+      # Boundary condition first node
+      bc1: clamped
+      # Save results of the run system
+      save: true
+      xloads:
+        # Include point follower forces
+        follower_forces: true
+        # Include point dead forces
+        dead_forces: false
+        # Include gravity in the analysis
+        gravity_forces: false
+        # Include aerodynamic forces
+        modalaero_forces: false
+        # x-axis vector for interpolation
+        x:
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 7
+        # Point follower forces
+        #     (len(x)x6xnum_nodes)
+        force_follower:
+        # Point follower forces
+        #     (len(x)x6xnum_nodes)
+        force_dead:
+        # Follower force points [Node, coordinate]
+        follower_points:
+        - - 25
+          - 1
+        # Dead force points [Node, coordinate]
+        dead_points:
+        # (Linear) interpolation of the follower forces on t         [[f0(t0)..f0(tn)]..[fm(t0)..fm(tn)]]
+        follower_interpolation:
+        - - 0.0
+          - -3700.0
+          - -12100.0
+          - -17500.0
+          - -39300.0
+          - -61000.0
+          - -94500.0
+          - -120000.0
+        # (Linear) interpolation of the dead forces on t         [[f0(t0)..f0(tn)]..[fm(t0)..fm(tn)]]
+        dead_interpolation:
+        # gravity force [m/s]
+        gravity: 9.807
+        # gravity vector
+        gravity_vect:
+        - 0
+        - 0
+        - -1
+      # Aerodynamic dataclass
+      aero:
+      # Initial time
+      t0: 0.0
+      # Final time
+      t1: 1.0
+      # Number of time steps
+      tn:
+      # Delta time
+      dt: 1
+      # Time vector
+      t:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      # Library solving our system of equations
+      solver_library: diffrax
+      # Name for the solver of the previously defined library
+      solver_function: newton_raphson
+      # Settings for the solver
+      solver_settings:
+        rtol: 1e-06
+        atol: 1e-06
+        max_steps: 50
+        norm: linalg_norm
+        kappa: 0.01
+      # Modal velocities, q1, and modal forces, q2, are the main variables
+      #         in the intrinsic structural description,
+      #         but the steady aerodynamics part needs a displacement component, q0;
+      #         proportional gain to q2 or  integration of velocities q1
+      #         can be used to obtain this.
+      q0treatment: 2
+      # whether to include the nonlinear terms in the eqs. (Gammas)
+      #         and in the integration
+      nonlinear: 1
+      # average the higher frequency eqs and make them algebraic
+      residualise: false
+      # number of modes to residualise
+      residual_modes: 0
+      # System label that maps to the solution functional
+      label: dq_10g11
+      # label dictionary assigning 
+      label_map:
+        soltype: 1
+        target: 0
+        gravity: g
+        bc1: 0
+        aero_sol: 0
+        aero_steady: 0
+        aero_unsteady: 0
+        point_loads: 1
+        q0treatment: 0
+        nonlinear: ''
+        residualise: ''
+      # Dictionary with the state variables.
+      states:
+      # Total number of states
+      num_states:
+      # Dictionary with initial conditions for each state
+      init_states:
+      # Dictionary mapping states types to functions in initcond
+      init_mapper:
+        q1: velocity
+        q2: force
