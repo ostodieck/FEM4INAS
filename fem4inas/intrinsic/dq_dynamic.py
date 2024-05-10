@@ -4,6 +4,7 @@ import jax
 import fem4inas.intrinsic.xloads as xloads
 import fem4inas.intrinsic.postprocess as postprocess
 import fem4inas.intrinsic.dq_common as common
+import fem4inas.intrinsic.functions as functions
 from functools import partial
 #@jax.jit
 def dq_20g1(t, q, *args):
@@ -18,7 +19,7 @@ def dq_20g1(t, q, *args):
 
 #@jax.jit
 def dq_20g11(t, q, *args):
-    """Structural dynamic follower point forces."""
+    """Clamped structural dynamic follower point forces."""
     
     (gamma1, gamma2, omega, phi1, x,
      force_follower, states) = args[0]
@@ -35,8 +36,8 @@ def dq_20g11(t, q, *args):
     return F
 
 def dq_20g121(t, q, *args):
-    """Structural dynamic dead point forces."""
-    
+    """Clamped structural dynamic dead point forces."""
+
     (gamma1, gamma2, omega, phi1l, psi2l,
      x, force_dead,
      states,
@@ -44,6 +45,7 @@ def dq_20g121(t, q, *args):
      C0ab,
      component_names, num_nodes,
      component_nodes, component_father) = args[0]
+    
     q1i = q[states['q1']]
     q2i = q[states['q2']]
     #@jax.jit
@@ -67,6 +69,87 @@ def dq_20g121(t, q, *args):
         F = jnp.hstack([F1, F2])
         return F
     F = _dq_20g121(t, q1i, q2i)
+    return F
+
+def dq_20g22(t, q, *args):
+    """Free structural dynamic follower point forces."""
+    
+    (gamma1, gamma2, omega, phi1, x,
+     force_follower, states) = args[0]
+
+    q1 = q[states['q1']]
+    q2 = q[states['q2']]
+    eta = xloads.eta_pointfollower(t,
+                                   phi1,
+                                   x,
+                                   force_follower)
+    F1, F2 = common.f_12(omega, gamma1, gamma2, q1, q2)
+    F1 += eta
+    F = jnp.hstack([F1, F2])
+    return F
+
+#@partial(jax.jit, static_argnums=2)
+def dq_20G2(t, q, *args):
+    """Free Structural dynamic gravity forces."""
+    
+    (gamma1, gamma2, omega, phi1l, psi2l,
+     force_gravity,
+     states,
+     X_xdelta,
+     C0ab,
+     component_names, num_nodes,
+     component_nodes, component_father) = args[0]
+    
+    q1 = q[states['q1']]
+    q2 = q[states['q2']]
+    qr = q[states['qr']]
+    
+    Rab = common.computeRab_node0(psi2l, q2, qr, X_xdelta, C0ab,
+                                  component_names,
+                                   num_nodes,
+                                   component_nodes,
+                                   component_father)
+
+    # no interpolation of gravity in dynamic case
+    eta = xloads.eta_pointdead_const(phi1l,
+                                     force_gravity[-1],
+                                     Rab)
+    F1, F2 = common.f_12(omega, gamma1, gamma2, q1, q2)
+    F1 += eta
+    Fr = common.f_quaternion(phi1l, q1, qr)
+    F = jnp.hstack([F1, F2, Fr])
+    return F
+
+def dq_20g242(t, q, *args):
+    """Free Structural dynamic dead point forces."""
+    
+    (gamma1, gamma2, omega, phi1l, psi2l,
+     x, force_dead,
+     states,
+     X_xdelta,
+     C0ab,
+     component_names, num_nodes,
+     component_nodes, component_father) = args[0]
+    
+    q1 = q[states['q1']]
+    q2 = q[states['q2']]
+    qr = q[states['qr']]
+
+    Rab = common.computeRab_node0(psi2l, q2, qr, X_xdelta, C0ab,
+                                  component_names,
+                                  num_nodes,
+                                  component_nodes,
+                                  component_father)
+    eta = xloads.eta_pointdead(t,
+                               phi1l,
+                               x,
+                               force_dead,
+                               Rab)
+    # import jax.debug; jax.debug.breakpoint()
+    F1, F2 = common.f_12(omega, gamma1, gamma2, q1, q2)
+    F1 += eta
+    Fr = common.f_quaternion(phi1l, q1, qr)
+    F = jnp.hstack([F1, F2, Fr])
     return F
 
 #@jax.jit
@@ -154,7 +237,6 @@ def dq_20g21l(t, q, *args):
     Fl += Flgust
     #Fl = Fl_tensor.reshape(num_modes * num_poles
     return jnp.hstack([F1, F2, Fl])
-
 
 @partial(jax.jit, static_argnames=['q'])
 def dq_20g273(t, q, *args):
