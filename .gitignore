@@ -4,7 +4,9 @@ __pycache__/
 venv/
 *.egg-info/
 **/results*/
+docs/reports/scitech24/figs/
 .*
+build/
 
 # Emacs stuff
 *~
